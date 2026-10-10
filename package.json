@@ -1,0 +1,19 @@
+{
+  "name": "hermes-activity",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub-style activity page for Hermes Desktop.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "install:local": "npm run build && node scripts/install-local.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate": "npm run build && hermes plugins validate ."
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "typescript": "^5.9.0"
+  }
+}
