@@ -22,7 +22,7 @@ import { Codicon, host, PALETTE_AREA, ROUTES_AREA, SegmentedControl, SIDEBAR_NAV
 import { useEffect, useMemo, useRef, useState } from "react";
 const ID = "hermes-activity";
 const ROUTE = "/activity";
-const WIDGET_VERSION = "0.1.0"; // must equal plugin.yaml `version`
+const WIDGET_VERSION = "0.1.1"; // must equal plugin.yaml `version`
 const CLI_TIMEOUT_MS = 60_000;
 // ───────────────────────────────────────────────────────────── formatting
 const tokensOf = (s) => s.input_tokens + s.output_tokens + s.cache_read_tokens + s.cache_write_tokens + s.reasoning_tokens;
@@ -311,7 +311,7 @@ function ActivityPage() {
     useRefreshOnTurnEnd(PREFIX);
     const q = useQuery({
         queryKey: [...PREFIX, "summary", key, range],
-        queryFn: () => activityCli(scope, ["summary", ...rangeArgs(range)]),
+        queryFn: () => activityCli(scope, ["summary", ...rangeArgs(range), "--desktop"]),
         staleTime: 5 * 60_000,
         retry: 1,
         refetchOnWindowFocus: false,

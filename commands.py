@@ -68,6 +68,7 @@ def setup_argparse(subparser) -> None:
     p.add_argument("--days", type=int, default=None, help=f"Last N days (1-{data.MAX_DAYS})")
     p.add_argument("--year", type=int, default=None, help="A calendar year, e.g. 2026 (overrides --days)")
     p.add_argument("--lite", action="store_true", help="Totals only (cheap; used by the status bar)")
+    p.add_argument("--desktop", action="store_true", help="Trim breakdowns to the rows rendered by the desktop page")
     p.add_argument("--json", action="store_true", help="Emit JSON for the desktop page")
     d = subs.add_parser("day", help="Sessions that started on one local day")
     d.add_argument("date", help="YYYY-MM-DD")
@@ -92,7 +93,14 @@ def handle_cli(args) -> None:
             return
         days, year = getattr(args, "days", None), getattr(args, "year", None)
         if as_json:
-            return _emit(data.summary(days=days, year=year, lite=bool(getattr(args, "lite", False))))
+            return _emit(
+                data.summary(
+                    days=days,
+                    year=year,
+                    lite=bool(getattr(args, "lite", False)),
+                    desktop=bool(getattr(args, "desktop", False)),
+                )
+            )
         print(render_text(days or 30))
     except data.ActivityError as exc:
         if as_json:

@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 MAX_DAYS = 731  # two years: enough for the year tabs, bounded so a query stays cheap
 
 
@@ -119,7 +119,12 @@ def _envelope(start_day: str, end_day: str, days, year) -> dict[str, Any]:
     }
 
 
-def summary(days: Optional[int] = None, year: Optional[int] = None, lite: bool = False) -> dict[str, Any]:
+def summary(
+    days: Optional[int] = None,
+    year: Optional[int] = None,
+    lite: bool = False,
+    desktop: bool = False,
+) -> dict[str, Any]:
     start_ts, end_ts, start_day, end_day = resolve_range(days, year)
     rng = (start_ts, end_ts)
     out = _envelope(start_day, end_day, days, year)
@@ -174,6 +179,10 @@ def summary(days: Optional[int] = None, year: Optional[int] = None, lite: bool =
         out["first_activity_day"] = date.fromtimestamp(first).isoformat() if first else None
 
     out["tools"], out["skills"] = _usage_breakdown(start_ts)
+    if desktop:
+        out["models"] = out["models"][:8]
+        out["tools"] = out["tools"][:8]
+        out["skills"] = {"top_skills": (out["skills"].get("top_skills") or [])[:8]}
     return out
 
 
