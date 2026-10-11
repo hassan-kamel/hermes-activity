@@ -37,6 +37,7 @@ The agent-side command reads the selected Hermes profile’s `state.db` in SQLit
 
 - `hermes activity summary --days 30 --json`
 - `hermes activity summary --year 2026 --json`
+- `hermes activity summary --days 365 --desktop --json` for the desktop page's compact breakdown payload
 - `hermes activity day 2026-01-15 --json`
 - `/activity 30` in a Hermes session
 

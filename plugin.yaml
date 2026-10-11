@@ -1,5 +1,5 @@
 name: hermes-activity
-version: "0.1.0"
+version: "0.1.1"
 manifest_version: 2
 api_version: 1
 description: "GitHub-style activity page for Hermes Desktop: a yearly contribution grid plus token totals and breakdowns, models, platforms, tools, skills and notable sessions. Read-only over the selected Hermes session store. No third-party API calls or telemetry."

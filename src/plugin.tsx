@@ -38,7 +38,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 
 const ID = "hermes-activity";
 const ROUTE = "/activity";
-const WIDGET_VERSION = "0.1.0"; // must equal plugin.yaml `version`
+const WIDGET_VERSION = "0.1.1"; // must equal plugin.yaml `version`
 const CLI_TIMEOUT_MS = 60_000;
 
 // ───────────────────────────────────────────────────────────── types (CLI payload)
@@ -590,7 +590,7 @@ function ActivityPage() {
 
   const q = useQuery<Summary>({
     queryKey: [...PREFIX, "summary", key, range],
-    queryFn: () => activityCli<Summary>(scope, ["summary", ...rangeArgs(range)]),
+    queryFn: () => activityCli<Summary>(scope, ["summary", ...rangeArgs(range), "--desktop"]),
     staleTime: 5 * 60_000,
     retry: 1,
     refetchOnWindowFocus: false,
