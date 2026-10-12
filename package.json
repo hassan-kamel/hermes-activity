@@ -1,12 +1,12 @@
 {
   "name": "hermes-activity",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "GitHub-style activity page for Hermes Desktop.",
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-desktop-plugin.ts",
     "watch": "tsc -p tsconfig.json --watch",
     "install:local": "npm run build && node scripts/install-local.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
