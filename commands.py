@@ -8,13 +8,22 @@ fresh process against the right profile and no gateway restart is ever needed.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 
 from . import activity_data as data
 
 HELP = """Usage: /activity [days]
 Shows token and session totals for the last N days (default 30).
 Open the Activity page in Hermes Desktop for the full contribution grid."""
+
+# The provider-history collector is a Node/TypeScript adapter (its provider
+# source adapters are TypeScript). Give a live fetch more room than a cache read.
+_REFRESH_TIMEOUT_S = 60
+_CACHED_TIMEOUT_S = 20
 
 
 def _fmt(n: float) -> str:
@@ -62,6 +71,17 @@ def slash_command(raw_args: str) -> str:
 # -- CLI command ------------------------------------------------------------------
 
 
+def _add_history_args(p) -> None:
+    p.add_argument("--days", type=int, default=365, help="Last 1-365 local days")
+    p.add_argument("--provider", default="all", help="Provider id or 'all'")
+    p.add_argument("--desktop", action="store_true", help="Return compact daily rows for the desktop page")
+    p.add_argument("--json", action="store_true", help="Emit structured provider history")
+    p.add_argument("--refresh", action="store_true", help="Fetch provider-reported usage and update the local archive")
+
+
+# -- provider-history (shared by the 'provider-history' command and its 'history' alias) --
+
+
 def setup_argparse(subparser) -> None:
     subs = subparser.add_subparsers(dest="activity_command")
     p = subs.add_parser("summary", help="Usage aggregates for a range (default: last 365 days)")
@@ -70,6 +90,8 @@ def setup_argparse(subparser) -> None:
     p.add_argument("--lite", action="store_true", help="Totals only (cheap; used by the status bar)")
     p.add_argument("--desktop", action="store_true", help="Trim breakdowns to the rows rendered by the desktop page")
     p.add_argument("--json", action="store_true", help="Emit JSON for the desktop page")
+    _add_history_args(subs.add_parser("provider-history", help="Provider-reported usage history (own cache; 'history' is an alias)"))
+    _add_history_args(subs.add_parser("history", help="Alias for provider-history"))
     d = subs.add_parser("day", help="Sessions that started on one local day")
     d.add_argument("date", help="YYYY-MM-DD")
     d.add_argument("--json", action="store_true", help="Emit JSON")
@@ -80,9 +102,86 @@ def _emit(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
 
 
+# -- provider history (Node collector) --------------------------------------------
+
+
+def _hermes_home() -> str:
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home())
+    except Exception:
+        return os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+
+
+def collect_provider_history(*, days: int, provider: str = "all", refresh: bool = False, desktop: bool = False) -> dict:
+    """Run the TypeScript provider-history collector and return its payload.
+
+    The collector resolves the profile through ``HERMES_HOME`` (passed through
+    explicitly) and reads saved account credentials from that home; credentials
+    are never echoed back. On any failure a structured error is returned instead
+    of raising, so the CLI can still emit valid JSON.
+    """
+    script = Path(__file__).resolve().parent / "scripts" / "provider-history.ts"
+    node = shutil.which("node")
+    if node is None:
+        return {"error": "node runtime not found on PATH (provider-history needs node)", "overview": []}
+    if not script.exists():
+        return {"error": "provider-history collector script is missing", "overview": []}
+    command = [node, str(script), "--days", str(days), "--provider", str(provider)]
+    if desktop:
+        command.append("--desktop")
+    if refresh:
+        command.append("--refresh")
+    env = dict(os.environ)
+    env["HERMES_HOME"] = _hermes_home()
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_REFRESH_TIMEOUT_S if refresh else _CACHED_TIMEOUT_S,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"error": f"provider history collector unavailable ({type(exc).__name__})", "overview": []}
+    if completed.returncode != 0:
+        return {"error": "provider history collector failed", "overview": []}
+    try:
+        result = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return {"error": "provider history collector returned invalid JSON", "overview": []}
+    if not isinstance(result, dict) or not isinstance(result.get("overview"), list):
+        return {"error": "provider history collector returned invalid data", "overview": []}
+    return result
+
+
+def _handle_provider_history(args, as_json: bool) -> None:
+    result = collect_provider_history(
+        days=max(1, min(int(getattr(args, "days", 365) or 365), 365)),
+        provider=getattr(args, "provider", "all") or "all",
+        refresh=bool(getattr(args, "refresh", False)),
+        desktop=bool(getattr(args, "desktop", False)),
+    )
+    if as_json:
+        return _emit(result)
+    if result.get("error"):
+        print(f"activity provider-history: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+    rng = result.get("range") or {}
+    overview = result.get("overview") or []
+    backed = sum(1 for row in overview if isinstance(row, dict) and row.get("status") in ("available", "summary-only"))
+    print(f"Provider history: {len(overview)} provider(s), {backed} with data, {rng.get('start')} to {rng.get('end')}")
+
+
 def handle_cli(args) -> None:
     cmd = getattr(args, "activity_command", None) or "summary"
     as_json = bool(getattr(args, "json", False))
+    if cmd in ("provider-history", "history"):
+        return _handle_provider_history(args, as_json)
     try:
         if cmd == "day":
             payload = data.day(args.date)

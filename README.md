@@ -7,7 +7,7 @@ A read-only activity dashboard for Hermes Desktop. It adds a GitHub-style daily 
 ## Requirements
 
 - Hermes Agent `>=0.21.5`
-- Node.js `>=20` and npm to build the TypeScript desktop UI
+- Node.js `>=22.18` for native TypeScript provider collection, and npm to build the desktop UI
 - Python is provided by Hermes for the native plugin backend; no additional Python dependencies are installed
 
 ## Install from Git
@@ -33,7 +33,14 @@ The UI source is `src/plugin.tsx`; it is TypeScript compiled to plain ESM by `ts
 
 ## Data and privacy
 
-The agent-side command reads the selected Hermes profile’s `state.db` in SQLite read-only mode. Aggregates are computed locally on that profile. The desktop page uses Hermes’ profile-routed `cli.exec` RPC to call the plugin’s fixed, read-only command; if the selected profile is remote, the request travels over that configured Hermes gateway connection. It makes no third-party API requests, uploads no analytics, and reads no credentials.
+The Hermes tab reads the selected profile's `state.db` in SQLite read-only mode. Aggregates are computed locally on that profile. The desktop page uses Hermes' profile-routed `cli.exec` RPC; remote profiles run collection on their configured gateway.
+
+The Providers tab is independent of the Quota plugin. Passive reads use Activity's own `activity_provider_history.json` cache under the selected `HERMES_HOME`. **Fetch provider data** reads the provider APIs using existing saved credentials, without signing in or changing credentials. CommandCode reports period totals only; Codex reports dated token buckets; OpenCode reports daily export totals; Ollama reports activity-period totals when a usable key is available. Missing metrics stay unknown, not zero. Summary-only totals never enter the annual heatmap. Combined figures represent reported account/workspace activity, not exclusively Hermes sessions, and can have partial source coverage.
+
+No telemetry or credential values are stored in the usage cache or returned to the desktop. Provider caches store usage aggregates and a hashed scope identifier. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for source-adapter attribution.
+
+- `hermes activity provider-history --days 365 --desktop --json`
+- `hermes activity provider-history --days 365 --desktop --json --refresh`
 
 - `hermes activity summary --days 30 --json`
 - `hermes activity summary --year 2026 --json`

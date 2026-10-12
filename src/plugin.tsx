@@ -34,11 +34,38 @@ import {
   type PluginContext,
   type ProfileRoute,
 } from "@hermes/plugin-sdk";
+import {
+  aggregateProviderBreakdown,
+  aggregateProviderDaily,
+  DEFAULT_PROVIDER_SELECTION,
+  EMPTY_PROVIDER_BREAKDOWN,
+  overviewDaySequence,
+  overviewDayValue,
+  overviewMetricChips,
+  overviewMetricText,
+  overviewSpendText,
+  parseProviderHistory,
+  PROVIDER_WINDOW_DAYS,
+  providerHistoryArgs,
+  providerModelBreakdown,
+  providerTokenMix,
+  type OverviewDailyRow,
+  type OverviewPeriod,
+  type OverviewStatus,
+  type ProviderBreakdown,
+  type ProviderDailyRow,
+  type ProviderDayCoverage,
+  type ProviderHistory,
+  type ProviderMetric,
+  type ProviderModelRow,
+  type ProviderOverview,
+  type TokenMixKey,
+} from "./provider-history.js";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 const ID = "hermes-activity";
 const ROUTE = "/activity";
-const WIDGET_VERSION = "0.1.1"; // must equal plugin.yaml `version`
+const WIDGET_VERSION = "0.2.0"; // must equal plugin.yaml `version`
 const CLI_TIMEOUT_MS = 60_000;
 
 // ───────────────────────────────────────────────────────────── types (CLI payload)
@@ -182,18 +209,22 @@ function parseCliJson<T>(output: string): T {
   throw new Error(output.trim().split("\n").slice(-3).join(" ") || "empty output from hermes activity");
 }
 
-async function activityCli<T>(scope: FocusedSessionOwner | null, argv: string[]): Promise<T> {
+async function profileCli<T>(scope: FocusedSessionOwner | null, command: string, argv: string[]): Promise<T> {
   const route = await resolveRoute(scope);
   const res = await host.requestProfile<{ blocked?: boolean; hint?: string; code: number; output: string }>(
     route,
     "cli.exec",
-    { argv: ["--profile", route.targetProfile, "activity", ...argv, "--json"], timeout: CLI_TIMEOUT_MS / 1000 },
+    { argv: ["--profile", route.targetProfile, command, ...argv, "--json"], timeout: CLI_TIMEOUT_MS / 1000 },
     CLI_TIMEOUT_MS + 5_000,
   );
   if (res.blocked) throw new Error(res.hint || "cli.exec blocked");
   const payload = parseCliJson<T & { error?: string }>(res.output || "");
   if (payload.error) throw new Error(payload.error);
   return payload;
+}
+
+async function activityCli<T>(scope: FocusedSessionOwner | null, argv: string[]): Promise<T> {
+  return profileCli<T>(scope, "activity", argv);
 }
 
 function useScope() {
@@ -453,26 +484,46 @@ function Legend() {
 
 // ───────────────────────────────────────────────────────────── other visualisations
 
+/**
+ * Shared, semantic token-mix palette (theme variables only, no hard-coded colours), so the
+ * Hermes tab and the provider tab render the same series identically.
+ */
+const MIX_COLORS: Record<TokenMixKey, string> = {
+  input_tokens: "var(--ui-blue, var(--ui-accent))",
+  output_tokens: "var(--ui-accent)",
+  reasoning_tokens: "var(--ui-purple, var(--ui-accent-secondary))",
+  cache_write_tokens: "var(--ui-yellow, var(--ui-warm))",
+  cache_read_tokens: "color-mix(in srgb, currentColor 22%, transparent)",
+};
+
+const TOKEN_MIX_LABELS: Record<TokenMixKey, string> = {
+  input_tokens: "Input",
+  output_tokens: "Output",
+  reasoning_tokens: "Reasoning",
+  cache_write_tokens: "Cache write",
+  cache_read_tokens: "Cache read",
+};
+
 function TokenMix({ t }: { t: Sums }) {
   const parts = [
-    { label: "Input", v: t.input_tokens, color: "var(--ui-blue, var(--ui-accent))" },
-    { label: "Output", v: t.output_tokens, color: "var(--ui-accent)" },
-    { label: "Reasoning", v: t.reasoning_tokens, color: "var(--ui-purple, var(--ui-accent-secondary))" },
-    { label: "Cache write", v: t.cache_write_tokens, color: "var(--ui-yellow, var(--ui-warm))" },
-    { label: "Cache read", v: t.cache_read_tokens, color: "color-mix(in srgb, currentColor 22%, transparent)" },
+    { key: "input_tokens" as const, v: t.input_tokens },
+    { key: "output_tokens" as const, v: t.output_tokens },
+    { key: "reasoning_tokens" as const, v: t.reasoning_tokens },
+    { key: "cache_write_tokens" as const, v: t.cache_write_tokens },
+    { key: "cache_read_tokens" as const, v: t.cache_read_tokens },
   ];
   const sum = parts.reduce((a, p) => a + p.v, 0) || 1;
   return (
     <div>
       <div className="flex h-2 overflow-hidden rounded-full" style={{ background: levelColor(0) }}>
-        {parts.map((p) => (p.v > 0 ? <span key={p.label} style={{ width: `${(p.v / sum) * 100}%`, background: p.color }} /> : null))}
+        {parts.map((p) => (p.v > 0 ? <span key={p.key} style={{ width: `${(p.v / sum) * 100}%`, background: MIX_COLORS[p.key] }} /> : null))}
       </div>
       <ul className="mt-2">
         {parts.map((p) => (
-          <li className="flex items-center justify-between gap-2 py-1" key={p.label}>
+          <li className="flex items-center justify-between gap-2 py-1" key={p.key}>
             <span className="inline-flex items-center gap-1.5 text-[0.7rem] text-foreground">
-              <span className="size-2 rounded-[1px]" style={{ background: p.color }} />
-              {p.label}
+              <span className="size-2 rounded-[1px]" style={{ background: MIX_COLORS[p.key] }} />
+              {TOKEN_MIX_LABELS[p.key]}
             </span>
             <span className="text-[0.7rem] text-(--ui-text-tertiary)">
               {compact(p.v)} · {((p.v / sum) * 100).toFixed(p.v / sum < 0.01 ? 1 : 0)}%
@@ -577,6 +628,708 @@ function streaks(daily: DailyRow[]) {
   return { current, longest: Math.max(longest, current), activeDays: active.size };
 }
 
+const PROVIDER_NAMES: Record<string, string> = {
+  all: "All providers",
+  commandcode: "CommandCode",
+  "opencode-go": "OpenCode Go/Zen",
+  "openai-codex": "Codex",
+  ollama: "Ollama",
+};
+
+const providerName = (id: string) => PROVIDER_NAMES[id] ?? id;
+
+const OVERVIEW_STATUS_TEXT: Record<OverviewStatus, string> = {
+  available: "Available",
+  "summary-only": "Summary only",
+  "auth-required": "Credentials required",
+  unavailable: "Unavailable",
+  "not-collected": "Not collected",
+  "not-integrated": "Not integrated",
+};
+
+const OVERVIEW_STATUS_HINT: Record<OverviewStatus, string> = {
+  available: "Activity reads this source's usage records.",
+  "summary-only": "This source reports period totals but no dated records.",
+  "auth-required": "No usable credentials were found, so no usage was read.",
+  unavailable: "This source did not return usage for this range.",
+  "not-collected": "No provider data was fetched for this range yet.",
+  "not-integrated": "No history source is configured for this provider.",
+};
+
+const shortStamp = (value: string) => {
+  const [date, time] = value.split("T");
+  if (!time) return prettyDay(date);
+  const hhmm = time.slice(0, 5);
+  return time.endsWith("Z") ? `${date} ${hhmm} UTC` : `${date} ${hhmm}`;
+};
+
+const overviewMetricLabel = (value: number, metric: ProviderMetric) =>
+  metric === "spend" ? money(value) : metric === "tokens" ? plural(value, "token") : plural(value, "request");
+
+const dayDetailText = (row: OverviewDailyRow | null) => {
+  if (!row) return "No record on the selected day.";
+  return [
+    row.day,
+    `requests ${overviewMetricText(row.requests, "count")}`,
+    `tokens ${overviewMetricText(row.tokens, "tokens")}`,
+    `input ${overviewMetricText(row.input_tokens, "tokens")}`,
+    `output ${overviewMetricText(row.output_tokens, "tokens")}`,
+    `cache read ${overviewMetricText(row.cache_read_tokens, "tokens")}`,
+    `reasoning ${overviewMetricText(row.reasoning_tokens, "tokens")}`,
+    `cost ${overviewSpendText(row.cost_usd)}`,
+  ].join(" · ");
+};
+
+async function providerHistoryQuery(scope: FocusedSessionOwner | null, mode: "cached" | "refresh" = "cached"): Promise<ProviderHistory> {
+  return parseProviderHistory(await activityCli<unknown>(scope, providerHistoryArgs(mode)));
+}
+
+function OverviewLegend() {
+  return (
+    <span className="inline-flex items-center gap-1 text-[0.6rem] text-(--ui-text-tertiary)">
+      Less
+      {[0, 1, 2, 3, 4].map((level) => (
+        <span key={level} style={{ width: CELL, height: CELL, borderRadius: 2, background: levelColor(level) }} />
+      ))}
+      More
+      <span
+        className="ml-1"
+        style={{ width: CELL, height: CELL, borderRadius: 2, border: "1px dashed color-mix(in srgb, currentColor 40%, transparent)" }}
+      />
+      not reported
+    </span>
+  );
+}
+
+function OverviewHeatmap({
+  daily,
+  start,
+  end,
+  metric,
+  selectedDay,
+  onSelectDay,
+}: {
+  daily: (OverviewDailyRow & { coverage?: ProviderDayCoverage })[];
+  start: string;
+  end: string;
+  metric: ProviderMetric;
+  selectedDay: string | null;
+  onSelectDay: (day: string | null) => void;
+}) {
+  const refs = useRef(new Map<string, HTMLElement>());
+  const [focusDay, setFocusDay] = useState<string | null>(null);
+
+  const model = useMemo(() => {
+    const byDay = new Map(daily.map((row) => [row.day, row]));
+    const startMs = Date.parse(`${start}T00:00:00Z`);
+    const offset = new Date(startMs).getUTCDay();
+    const gridStartMs = startMs - offset * 86_400_000;
+    const days = overviewDaySequence(start, end);
+    const weeks = Math.ceil((offset + days.length) / 7);
+
+    const known = days
+      .map((day) => byDay.get(day))
+      .filter((row): row is OverviewDailyRow => !!row)
+      .map((row) => overviewDayValue(row, metric))
+      .filter((value): value is number => value !== null && value > 0)
+      .sort((a, b) => a - b);
+    const quantile = (fraction: number) => known[Math.min(known.length - 1, Math.floor(known.length * fraction))] ?? 0;
+    const thresholds = [quantile(0.25), quantile(0.5), quantile(0.75)];
+    const level = (value: number) => value <= 0 ? 0 : value <= thresholds[0] ? 1 : value <= thresholds[1] ? 2 : value <= thresholds[2] ? 3 : 4;
+
+    const cols: { month: string; cells: { day: string; row: (OverviewDailyRow & { coverage?: ProviderDayCoverage }) | undefined; value: number | null; out: boolean }[] }[] = [];
+    let prevMonth = -1;
+    for (let week = 0; week < weeks; week++) {
+      const colStartMs = gridStartMs + week * 7 * 86_400_000;
+      const cells = [];
+      for (let dow = 0; dow < 7; dow++) {
+        const day = new Date(colStartMs + dow * 86_400_000).toISOString().slice(0, 10);
+        const inRange = day >= start && day <= end;
+        const row = inRange ? byDay.get(day) : undefined;
+        cells.push({ day, row, value: row ? overviewDayValue(row, metric) : null, out: !inRange });
+      }
+      const anchor = cells.find((cell) => !cell.out) ?? cells[0];
+      const month = new Date(`${anchor.day}T00:00:00Z`).getUTCMonth();
+      cols.push({ month: month !== prevMonth ? MONTHS[month] : "", cells });
+      prevMonth = month;
+    }
+    // A leading label is wider than its column: drop it when the next month starts right after.
+    if (cols[0]?.month && (cols[1]?.month || cols[2]?.month)) cols[0].month = "";
+    return { cols, level };
+  }, [daily, start, end, metric]);
+
+  const inRange = model.cols.flatMap((col) => col.cells.filter((cell) => !cell.out));
+
+  const labelFor = (cell: { day: string; row: (OverviewDailyRow & { coverage?: ProviderDayCoverage }) | undefined; value: number | null }) => {
+    if (!cell.row) return `${prettyDay(cell.day)}: no record`;
+    const base = cell.value === null ? "not reported" : overviewMetricLabel(cell.value, metric);
+    const coverage = cell.row.coverage && cell.row.coverage.expected > 0 && cell.row.coverage.reported < cell.row.coverage.expected
+      ? ` · ${cell.row.coverage.reported}/${cell.row.coverage.expected} sources reported`
+      : "";
+    return `${prettyDay(cell.day)}: ${base}${coverage}`;
+  };
+
+  const focusIndex = (index: number) => {
+    if (!inRange.length) return;
+    const clamped = Math.max(0, Math.min(inRange.length - 1, index));
+    const day = inRange[clamped].day;
+    setFocusDay(day);
+    refs.current.get(day)?.focus();
+  };
+
+  const currentIndex = inRange.findIndex((cell) => cell.day === focusDay);
+  const tabDay = focusDay ?? inRange[0]?.day ?? null;
+  const labelCol: CSSProperties = { display: "grid", gridTemplateRows: `14px repeat(7, ${CELL}px)`, gap: GAP, marginRight: 6 };
+
+  return (
+    <div
+      className="overflow-x-auto pb-1"
+      onKeyDown={(event) => {
+        const target = (event.target as HTMLElement).closest<HTMLElement>("[data-day]");
+        if (!target?.dataset.day) return;
+        const index = inRange.findIndex((cell) => cell.day === target.dataset.day);
+        if (index < 0) return;
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          focusIndex(index - 1);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          focusIndex(index + 1);
+        } else if (event.key === "ArrowUp") {
+          event.preventDefault();
+          focusIndex(index - 7);
+        } else if (event.key === "ArrowDown") {
+          event.preventDefault();
+          focusIndex(index + 7);
+        } else if (event.key === "Home") {
+          event.preventDefault();
+          focusIndex(0);
+        } else if (event.key === "End") {
+          event.preventDefault();
+          focusIndex(inRange.length - 1);
+        } else if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelectDay(selectedDay === target.dataset.day ? null : target.dataset.day);
+        }
+      }}
+    >
+      <div style={{ display: "flex", width: "max-content" }}>
+        <div aria-hidden style={labelCol}>
+          <span />
+          {WEEKDAYS.map((weekday, index) => (
+            <span className="text-[0.6rem] leading-[11px] text-(--ui-text-tertiary)" key={weekday}>
+              {index % 2 === 1 ? weekday : ""}
+            </span>
+          ))}
+        </div>
+        <div
+          aria-label="Provider daily usage by day"
+          role="grid"
+          style={{ display: "grid", gridAutoFlow: "column", gridTemplateRows: `14px repeat(7, ${CELL}px)`, gridAutoColumns: CELL, gap: GAP }}
+        >
+          {model.cols.map((col, ci) => [
+            <span className="overflow-visible whitespace-nowrap text-[0.6rem] leading-[14px] text-(--ui-text-tertiary)" key={`m${ci}`}>
+              {col.month}
+            </span>,
+            ...col.cells.map((cell) =>
+              cell.out ? (
+                <span key={cell.day} />
+              ) : (
+                <span
+                  aria-label={labelFor(cell)}
+                  aria-selected={selectedDay === cell.day}
+                  data-day={cell.day}
+                  key={cell.day}
+                  onClick={() => onSelectDay(selectedDay === cell.day ? null : cell.day)}
+                  onFocus={() => setFocusDay(cell.day)}
+                  ref={(element) => {
+                    if (element) refs.current.set(cell.day, element);
+                    else refs.current.delete(cell.day);
+                  }}
+                  role="gridcell"
+                  tabIndex={cell.day === tabDay ? 0 : -1}
+                  title={labelFor(cell)}
+                  style={{
+                    width: CELL,
+                    height: CELL,
+                    borderRadius: 2,
+                    cursor: "pointer",
+                    background: cell.value !== null ? levelColor(model.level(cell.value)) : "transparent",
+                    border: cell.value === null ? "1px dashed color-mix(in srgb, currentColor 40%, transparent)" : undefined,
+                    outline: selectedDay === cell.day ? "1px solid var(--ui-text-primary, currentColor)" : undefined,
+                    outlineOffset: 1,
+                  }}
+                />
+              ),
+            ),
+          ])}
+        </div>
+      </div>
+      <span className={`mt-1 block ${CAPTION}`}>
+        {currentIndex >= 0 ? `Focused ${prettyDay(inRange[currentIndex].day)}` : "One cell is in the tab order; arrow keys move between days."}
+      </span>
+    </div>
+  );
+}
+
+function OverviewDailyTable({
+  rows,
+  providerColumn,
+  selectedDay,
+}: {
+  rows: (OverviewDailyRow & { provider?: string })[];
+  providerColumn?: boolean;
+  selectedDay?: string | null;
+}) {
+  if (!rows.length) return <div className={CAPTION}>No dated records for this range.</div>;
+  const sorted = [...rows].sort((a, b) => (a.day === b.day ? (a.provider ?? "").localeCompare(b.provider ?? "") : a.day < b.day ? -1 : 1));
+  const metricCell = (value: number | null, kind: "count" | "tokens") =>
+    value === null ? <span className="text-(--ui-text-tertiary)">not reported</span> : <span>{overviewMetricText(value, kind)}</span>;
+  const headers = ["Requests", "Tokens", "Input", "Output", "Cache read", "Cache write", "Reasoning"];
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-max border-collapse text-[0.7rem]">
+        <thead>
+          <tr className="text-left">
+            {providerColumn && <th className={`pb-1 pr-3 font-medium ${LABEL}`}>Provider</th>}
+            <th className={`pb-1 pr-3 font-medium ${LABEL}`}>Day</th>
+            {headers.map((label) => (
+              <th className={`pb-1 pr-3 text-right font-medium ${LABEL}`} key={label}>
+                {label}
+              </th>
+            ))}
+            <th className={`pb-1 text-right font-medium ${LABEL}`}>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((row) => (
+            <tr className={selectedDay === row.day ? "bg-(--chrome-action-hover)" : undefined} key={`${row.provider ?? ""}::${row.day}`}>
+              {providerColumn && (
+                <td className="py-1 pr-3 font-mono text-[0.66rem] text-(--ui-text-tertiary)">{providerName(row.provider ?? "unknown")}</td>
+              )}
+              <td className="py-1 pr-3 font-mono text-[0.66rem] text-foreground">{row.day}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.requests, "count")}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.tokens, "tokens")}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.input_tokens, "tokens")}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.output_tokens, "tokens")}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.cache_read_tokens, "tokens")}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.cache_write_tokens, "tokens")}</td>
+              <td className="py-1 pr-3 text-right">{metricCell(row.reasoning_tokens, "tokens")}</td>
+              <td className="py-1 text-right">{row.cost_usd === null ? "not reported" : overviewSpendText(row.cost_usd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ArchiveTable({ rows }: { rows: ProviderDailyRow[] }) {
+  const sorted = [...rows].sort((a, b) => (a.day === b.day ? a.provider.localeCompare(b.provider) : a.day < b.day ? -1 : 1));
+  const cells = (row: ProviderDailyRow) => [row.requests, row.tokens, row.input_tokens, row.output_tokens, row.cache_read_tokens, row.reasoning_tokens];
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-max border-collapse text-[0.7rem]">
+        <thead>
+          <tr className="text-left">
+            <th className={`pb-1 pr-3 font-medium ${LABEL}`}>Provider</th>
+            <th className={`pb-1 pr-3 font-medium ${LABEL}`}>Day</th>
+            {["Requests", "Tokens", "Input", "Output", "Cache read", "Reasoning"].map((label) => (
+              <th className={`pb-1 pr-3 text-right font-medium ${LABEL}`} key={label}>
+                {label}
+              </th>
+            ))}
+            <th className={`pb-1 text-right font-medium ${LABEL}`}>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((row) => (
+            <tr key={`${row.provider}::${row.day}`}>
+              <td className="py-1 pr-3 font-mono text-[0.66rem] text-(--ui-text-tertiary)">{providerName(row.provider)}</td>
+              <td className="py-1 pr-3 font-mono text-[0.66rem] text-foreground">{row.day}</td>
+              {cells(row).map((value, index) => (
+                <td className="py-1 pr-3 text-right" key={index}>
+                  {compact(value)}
+                </td>
+              ))}
+              <td className="py-1 text-right">{row.cost_usd === null ? "not reported" : overviewSpendText(row.cost_usd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ProviderPeriodRows({ period }: { period: OverviewPeriod }) {
+  const chips = overviewMetricChips(period);
+  return (
+    <span className="flex flex-col gap-1 border-t border-(--ui-border-subtle) pt-1.5">
+      <span className="flex items-baseline justify-between gap-2">
+        <span className="truncate text-[0.72rem] text-foreground">{period.label}</span>
+        <span className="shrink-0 text-[0.6rem] text-(--ui-text-tertiary)">{period.basis}</span>
+      </span>
+      {(period.start || period.end) && (
+        <span className={`block truncate ${CAPTION}`}>
+          {period.start ? shortStamp(period.start) : "open start"} to {period.end ? shortStamp(period.end) : "open end"}
+        </span>
+      )}
+      <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-[0.72rem] text-(--ui-text-secondary)">
+        {chips.length ? chips.map((chip) => <span key={chip}>{chip}</span>) : <span className={CAPTION}>No reported metrics</span>}
+      </span>
+      {period.models.length > 0 && (
+        <span className="flex flex-col gap-0.5">
+          {period.models.slice(0, 4).map((model) => (
+            <span className="flex items-center justify-between gap-2" key={model.model}>
+              <span className="truncate font-mono text-[0.66rem] text-(--ui-text-tertiary)">{model.model}</span>
+              <span className="shrink-0 text-[0.66rem] text-(--ui-text-tertiary)">
+                {overviewMetricChips(model).join(" · ") || "not reported"}
+              </span>
+            </span>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function ProviderSourceRow({ record }: { record: ProviderOverview }) {
+  const period = record.periods[0];
+  const chips = period ? overviewMetricChips(period) : [];
+  const summary = chips.length
+    ? chips.join(" · ")
+    : period
+      ? `${period.label} · no reported metrics`
+      : record.daily.length
+        ? `${record.daily.length} dated record${record.daily.length === 1 ? "" : "s"}`
+        : OVERVIEW_STATUS_HINT[record.status];
+  return (
+    <li className="py-2">
+      <details>
+        <summary className="cursor-pointer text-[0.8rem] text-foreground">
+          <span className="inline-flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 align-middle">
+            <span className="font-semibold tracking-tight">{providerName(record.id)}</span>
+            <span className="rounded-full border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.6rem] text-(--ui-text-tertiary)">
+              {OVERVIEW_STATUS_TEXT[record.status]}
+            </span>
+            <span className={`truncate ${CAPTION}`}>{summary}</span>
+          </span>
+        </summary>
+        <div className="mt-2 flex flex-col gap-1.5">
+          <span className={CAPTION}>{record.scope} · {record.source}</span>
+          <span className={CAPTION}>
+            {record.data_as_of
+              ? `Data as of ${shortStamp(record.data_as_of)}`
+              : record.fetched_at
+                ? `Fetched ${shortStamp(record.fetched_at)}`
+                : "No fetch timestamp"}
+          </span>
+          {record.periods.map((entry) => (
+            <ProviderPeriodRows key={`${entry.label}::${entry.basis}`} period={entry} />
+          ))}
+          {record.windows.map((window) => (
+            <span className={CAPTION} key={`${window.label}::${window.reset_at ?? ""}`}>
+              {window.label}: {window.used_percent === null ? "usage not reported" : `${window.used_percent.toFixed(1)}% used`}
+              {window.reset_at ? `, resets ${shortStamp(window.reset_at)}` : ""}
+            </span>
+          ))}
+          {record.reason && <span className="font-mono text-[0.62rem] text-(--ui-text-tertiary)">reason: {record.reason}</span>}
+          {record.note && <span className={CAPTION}>{record.note}</span>}
+          {(!record.periods.length || record.status !== "available") && <span className={CAPTION}>{OVERVIEW_STATUS_HINT[record.status]}</span>}
+        </div>
+      </details>
+    </li>
+  );
+}
+
+function ProviderTokenMixSection({ breakdown, scopeLabel }: { breakdown: ProviderBreakdown; scopeLabel: string }) {
+  const mix = providerTokenMix(breakdown);
+  const canDraw = mix.denominator !== null && mix.denominator > 0;
+  const hasAny = mix.segments.some((segment) => segment.tokens !== null);
+  const caption = canDraw
+    ? `Token mix for ${scopeLabel}, using each source's own reported token total over the annual window. Unknown components stay not reported.`
+    : `No component tokens were reported by ${scopeLabel} for the annual window, so no mix can be drawn.`;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex h-2 overflow-hidden rounded-full" style={{ background: levelColor(0) }}>
+        {canDraw &&
+          mix.segments.map((segment) =>
+            segment.share && segment.share > 0 ? (
+              <span key={segment.key} style={{ width: `${segment.share * 100}%`, background: MIX_COLORS[segment.key] }} />
+            ) : null,
+          )}
+      </div>
+      <ul className="mt-0.5">
+        {mix.segments.map((segment) => (
+          <li className="flex items-center justify-between gap-2 py-1" key={segment.key}>
+            <span className="inline-flex items-center gap-1.5 text-[0.7rem] text-foreground">
+              <span className="size-2 rounded-[1px]" style={{ background: MIX_COLORS[segment.key] }} />
+              {TOKEN_MIX_LABELS[segment.key]}
+            </span>
+            <span className="text-[0.7rem] text-(--ui-text-tertiary)">
+              {segment.tokens === null
+                ? "not reported"
+                : segment.share === null
+                  ? overviewMetricText(segment.tokens, "tokens")
+                  : `${overviewMetricText(segment.tokens, "tokens")} · ${segment.share > 0 && segment.share * 100 < 0.1 ? "<0.1" : (segment.share * 100).toFixed(segment.share * 100 < 1 ? 1 : 0)}%`}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <span className={CAPTION}>
+        {caption}
+        {hasAny && mix.partial ? " Some components are unreported, so percentages are shown only against the reported total." : ""}
+      </span>
+    </div>
+  );
+}
+
+function ProviderModelBreakdown({ rows }: { rows: ProviderModelRow[] }) {
+  return (
+    <List
+      empty="No per-model rows were reported by any source."
+      rows={rows.map((row) => ({
+        key: `${row.source}::${row.period}::${row.model}`,
+        label: row.model,
+        value: overviewMetricChips({ requests: row.requests, tokens: row.tokens, cost_usd: row.cost_usd }).join(" · ") || "not reported",
+        hint: `${providerName(row.source)} · ${row.period}`,
+      }))}
+    />
+  );
+}
+
+function ProviderSummaryTiles({ breakdown }: { breakdown: ProviderBreakdown }) {
+  const tiles: { label: string; value: string; hint?: string }[] = [
+    { label: "Total tokens", value: overviewMetricText(breakdown.tokens, "tokens") },
+    { label: "Input", value: overviewMetricText(breakdown.input_tokens, "tokens") },
+    { label: "Output", value: overviewMetricText(breakdown.output_tokens, "tokens") },
+    { label: "Cache read", value: overviewMetricText(breakdown.cache_read_tokens, "tokens") },
+    { label: "Cache write", value: overviewMetricText(breakdown.cache_write_tokens, "tokens") },
+    { label: "Reasoning", value: overviewMetricText(breakdown.reasoning_tokens, "tokens") },
+    { label: "Requests", value: overviewMetricText(breakdown.requests, "count") },
+    { label: "Reported spend (USD)", value: overviewSpendText(breakdown.cost_usd) },
+    {
+      label: "Active days",
+      value: overviewMetricText(breakdown.active_days, "count"),
+      hint: `${overviewMetricText(breakdown.reported_days, "count")} dated row${breakdown.reported_days === 1 ? "" : "s"}`,
+    },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-3 lg:grid-cols-4">
+      {tiles.map((tile) => (
+        <Stat key={tile.label} hint={tile.hint} label={tile.label} value={tile.value} />
+      ))}
+    </div>
+  );
+}
+
+function ProviderHistoryView({
+  history,
+  onFetch,
+  fetching,
+  fetchError,
+}: {
+  history: ProviderHistory;
+  onFetch: () => void;
+  fetching: boolean;
+  fetchError: string | null;
+}) {
+  const [selected, setSelected] = useState<string>(DEFAULT_PROVIDER_SELECTION);
+  const [metric, setMetric] = useState<ProviderMetric>("tokens");
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const records = history.overview;
+  const selectedId = selected === DEFAULT_PROVIDER_SELECTION || records.some((record) => record.id === selected) ? selected : DEFAULT_PROVIDER_SELECTION;
+  const activeRecord = records.find((record) => record.id === selectedId) ?? null;
+  const showingAll = selectedId === DEFAULT_PROVIDER_SELECTION;
+  const selectProvider = (id: string) => {
+    setSelected(id);
+    setSelectedDay(null);
+    CTX?.storage.set("provider", id);
+  };
+
+  // Combined view sums each source's own dated records. Summary-only sources expose no dated
+  // rows, so their period totals stay in the source summaries and never enter the timeline.
+  const combined = aggregateProviderDaily(
+    records.map((record) => ({ id: record.id, daily: record.daily })),
+    history.range.start,
+    history.range.end,
+  );
+  const reportingSources = records.filter((record) => record.daily.length > 0).length;
+  const chartRows: (OverviewDailyRow & { coverage?: ProviderDayCoverage })[] = showingAll
+    ? combined.map((row) => ({ ...row, coverage: row.metricCoverage[metric] }))
+    : activeRecord?.daily ?? [];
+  const tableRows = showingAll
+    ? records.flatMap((record) => record.daily.map((row) => ({ ...row, provider: record.id })))
+    : activeRecord?.daily ?? [];
+  const chartHasData = showingAll ? reportingSources > 0 : (activeRecord?.daily.length ?? 0) > 0;
+  const summary = aggregateProviderBreakdown(
+    records.map((record) => ({ id: record.id, breakdown: record.breakdown, daily: record.daily })),
+    history.range.start,
+    history.range.end,
+  );
+  const summaryBreakdown = showingAll ? summary.breakdown : activeRecord?.breakdown ?? EMPTY_PROVIDER_BREAKDOWN;
+  const summaryPartial = Object.values(summary.metricCoverage).some((entry) => entry.expected > 0 && entry.reported < entry.expected);
+  const summaryCaption = showingAll
+    ? summary.contributors > 0
+      ? `Combined from ${summary.contributors} source${summary.contributors === 1 ? "" : "s"} reporting dated records${summary.contributors < records.length ? ` of ${records.length}` : ""}. Spend adds each reported cost exactly and active days union the dates sources report; the annual window is requested, not full provider history.`
+      : "No source reports dated records for this annual window, so combined metrics stay not reported."
+    : activeRecord?.status === "summary-only"
+      ? "This source reports period totals only, so annual metrics stay not reported. Its period summary remains under Provider sources."
+      : (activeRecord?.daily.length ?? 0) > 0
+        ? "Summed from this source's dated records for the annual window."
+        : "This source reported no dated records for the annual window.";
+  const selectedRow = chartRows.find((row) => row.day === selectedDay) ?? null;
+  const modelRows = providerModelBreakdown(history);
+  const scopeLabel = showingAll ? "all sources" : providerName(selectedId);
+  const outsideRangeNote = (rows: OverviewDailyRow[]) =>
+    rows.some((row) => row.day < history.range.start || row.day > history.range.end) ? (
+      <div className={`mt-2 ${CAPTION}`}>Rows outside the annual window are provider-dated and shown as reported.</div>
+    ) : null;
+  const metricOptions: { id: ProviderMetric; label: string }[] = [
+    { id: "requests", label: "Requests" },
+    { id: "tokens", label: "Tokens" },
+    { id: "spend", label: "Spend" },
+  ];
+  const emptyChartText = showingAll
+    ? "Fetch provider data to populate the annual timeline. Reads use existing credentials only; nothing is signed in or changed automatically."
+    : activeRecord?.status === "summary-only"
+      ? "This source reports period totals only, so there are no dated records to chart."
+      : "No dated records from this source for this annual window yet.";
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <label className="flex min-w-0 items-center gap-2">
+          <span className={LABEL}>Provider</span>
+          <select
+            className="min-w-0 max-w-[16rem] rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) px-2 py-1 text-[0.75rem] text-foreground"
+            onChange={(event) => selectProvider(event.target.value)}
+            value={selectedId}
+          >
+            <option value={DEFAULT_PROVIDER_SELECTION}>
+              All providers{reportingSources ? ` (${reportingSources} reporting)` : ""}
+            </option>
+            {records.map((record) => (
+              <option key={record.id} value={record.id}>
+                {providerName(record.id)} — {OVERVIEW_STATUS_TEXT[record.status]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {fetchError && <span className={`max-w-xs truncate ${CAPTION}`} title={fetchError}>{fetchError}</span>}
+          <SegmentedControl onChange={(id) => setMetric(id as ProviderMetric)} options={metricOptions} value={metric} />
+          <button
+            className="inline-flex shrink-0 items-center gap-1.5 rounded border border-(--ui-stroke-secondary) px-2 py-1 text-[0.7rem] text-foreground hover:bg-(--chrome-action-hover) disabled:opacity-60"
+            disabled={fetching}
+            onClick={onFetch}
+            type="button"
+          >
+            <Codicon name="cloud-download" spinning={fetching} />
+            {fetching ? "Fetching provider data" : "Fetch provider data"}
+          </button>
+        </div>
+      </div>
+
+      <Section title={showingAll ? "Combined daily usage" : `${providerName(selectedId)} daily usage`}>
+        {chartHasData ? (
+          <div className="flex flex-col gap-2">
+            <OverviewHeatmap
+              daily={chartRows}
+              end={history.range.end}
+              metric={metric}
+              onSelectDay={setSelectedDay}
+              selectedDay={selectedDay}
+              start={history.range.start}
+            />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-[0.6rem] text-(--ui-text-tertiary)">
+                {selectedDay ? dayDetailText(selectedRow) : "Arrow keys move between days, Enter selects one."}
+              </span>
+              <OverviewLegend />
+            </div>
+            <span className={CAPTION}>
+              {showingAll
+                ? `Combined across ${reportingSources} source${reportingSources === 1 ? "" : "s"} that report dated records. Each day sums the values sources actually reported; days only some sources covered are marked partial and missing values are never counted as zero.`
+                : "This source's own dated records for the annual window."}
+            </span>
+            <details className="rounded border border-(--ui-border-subtle)">
+              <summary className="cursor-pointer px-2 py-1 text-[0.72rem] text-(--ui-text-secondary)">Daily records table</summary>
+              <div className="px-2 pb-2">
+                <OverviewDailyTable providerColumn={showingAll} rows={tableRows} selectedDay={selectedDay} />
+                {outsideRangeNote(tableRows)}
+              </div>
+            </details>
+          </div>
+        ) : (
+          <div className={CAPTION}>{emptyChartText}</div>
+        )}
+      </Section>
+
+      <Section title={showingAll ? "Combined usage summary" : `${providerName(selectedId)} usage summary`}>
+        <div className="flex flex-col gap-3">
+          <ProviderSummaryTiles breakdown={summaryBreakdown} />
+          <span className={CAPTION}>
+            {summaryCaption}
+            {showingAll && summaryPartial ? " Some sources report only part of these metrics; unreported values stay blank rather than zero." : ""}
+          </span>
+        </div>
+      </Section>
+
+      <Section title="Token mix">
+        <ProviderTokenMixSection breakdown={summaryBreakdown} scopeLabel={scopeLabel} />
+      </Section>
+
+      <Section title="Model breakdown by source period">
+        <ProviderModelBreakdown rows={modelRows} />
+        <div className={`mt-2 ${CAPTION}`}>
+          Each row belongs to one source and one period (for example “Lifetime” or “Last 30 days”). Model totals are never merged across periods or folded into the annual window, so different-period figures are never added together.
+        </div>
+      </Section>
+
+      <Section title="Provider sources">
+        {records.length ? (
+          <ul className="divide-y divide-(--ui-border-subtle)">
+            {records.map((record) => (
+              <ProviderSourceRow key={record.id} record={record} />
+            ))}
+          </ul>
+        ) : (
+          <ul className="divide-y divide-(--ui-border-subtle)">
+            {history.providers.map((provider) => (
+              <li className="flex items-center justify-between gap-3 py-2" key={provider.id}>
+                <span className={TEXT}>{providerName(provider.id)}</span>
+                <span className={CAPTION}>
+                  {!provider.supported
+                    ? "History not available from this provider"
+                    : provider.has_history
+                      ? "Provider history captured"
+                      : "Supported, no records captured in the annual window"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {!records.length && !history.providers.length && <div className={CAPTION}>No providers are configured.</div>}
+        {!records.length && (
+          <div className={`mt-2 ${CAPTION}`}>
+            The installed Activity backend does not report per-provider source summaries yet. Fetch provider data after updating the plugin to populate them.
+          </div>
+        )}
+        <div className={`mt-2 ${CAPTION}`}>
+          Expand a source for its scope, timestamps, notes and model rows. Period totals come from each provider's own report and are never converted from usage percentages.
+        </div>
+      </Section>
+
+      {history.daily.length > 0 && (
+        <Section title="Local archive events">
+          <ArchiveTable rows={history.daily} />
+          <div className={`mt-2 ${CAPTION}`}>Provider-reported events archived locally; separate from the source summaries above.</div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
 function rangeArgs(range: string): string[] {
   return /^\d{4}$/.test(range) ? ["--year", range] : ["--days", range];
 }
@@ -584,8 +1337,13 @@ function rangeArgs(range: string): string[] {
 function ActivityPage() {
   const { scope, key } = useScope();
   const [range, setRange] = useState(() => CTX?.storage.get("range") || "365");
+  const [view, setView] = useState<"hermes" | "providers">(() => (CTX?.storage.get("view") as "hermes" | "providers") || "hermes");
   const [metric, setMetric] = useState<Metric>(() => (CTX?.storage.get("metric") as Metric) || "tokens");
   const [selected, setSelected] = useState<string | null>(null);
+  const [freshProviderHistory, setFreshProviderHistory] = useState<{ key: string; history: ProviderHistory } | null>(null);
+  const [fetchingProviders, setFetchingProviders] = useState(false);
+  const [fetchProviderError, setFetchProviderError] = useState<string | null>(null);
+  const qc = useQueryClient();
   useRefreshOnTurnEnd(PREFIX);
 
   const q = useQuery<Summary>({
@@ -603,6 +1361,37 @@ function ActivityPage() {
     staleTime: 5 * 60_000,
     retry: 1,
   });
+  const providerQ = useQuery<ProviderHistory>({
+    queryKey: [...PREFIX, "provider-history", key, PROVIDER_WINDOW_DAYS],
+    queryFn: () => providerHistoryQuery(scope),
+    enabled: view === "providers",
+    staleTime: 5 * 60_000,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+  useEffect(() => {
+    setFetchProviderError(null);
+  }, [key]);
+  const providerKeyRef = useRef(key);
+  providerKeyRef.current = key;
+  const fetchProviders = async () => {
+    const targetKey = providerKeyRef.current;
+    setFetchingProviders(true);
+    setFetchProviderError(null);
+    try {
+      const history = await providerHistoryQuery(scope, "refresh");
+      setFreshProviderHistory({ key: targetKey, history });
+      void qc.invalidateQueries({ queryKey: [...PREFIX, "provider-history", targetKey, PROVIDER_WINDOW_DAYS] });
+    } catch (error) {
+      if (providerKeyRef.current === targetKey) {
+        setFetchProviderError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      setFetchingProviders(false);
+    }
+  };
+  const providerHistory =
+    freshProviderHistory && freshProviderHistory.key === key ? freshProviderHistory.history : providerQ.data;
 
   const data = q.data;
   const thisYear = new Date().getFullYear();
@@ -622,21 +1411,38 @@ function ActivityPage() {
           <h1 className="text-base font-semibold tracking-tight text-foreground">Activity</h1>
         </div>
         <div className={`mt-0.5 ${CAPTION}`}>
-          {data ? `${prettyDay(data.range.start)} – ${prettyDay(data.range.end)}` : "Your Hermes usage, read from the local session store"}
+          {view === "providers" && providerHistory
+            ? `${prettyDay(providerHistory.range.start)} – ${prettyDay(providerHistory.range.end)} · provider-reported history`
+            : data ? `${prettyDay(data.range.start)} – ${prettyDay(data.range.end)}` : "Your Hermes usage, read from the local session store"}
           {scope?.profile ? ` · ${scope.profile}` : ""}
         </div>
       </div>
       <div className="flex items-center gap-2">
         <SegmentedControl
           onChange={(id) => {
-            setRange(id);
-            setSelected(null);
-            CTX?.storage.set("range", id);
+            setView(id as "hermes" | "providers");
+            CTX?.storage.set("view", id);
           }}
-          options={rangeOptions}
-          value={range}
+          options={[{ id: "hermes", label: "Hermes" }, { id: "providers", label: "Providers" }]}
+          value={view}
         />
-        <IconButton icon="refresh" label="Refresh" onClick={() => void q.refetch()} spinning={q.isFetching} />
+        {view === "hermes" && (
+          <SegmentedControl
+            onChange={(id) => {
+              setRange(id);
+              setSelected(null);
+              CTX?.storage.set("range", id);
+            }}
+            options={rangeOptions}
+            value={range}
+          />
+        )}
+        <IconButton
+          icon="refresh"
+          label={view === "providers" ? "Reload cached history" : "Refresh"}
+          onClick={() => void (view === "providers" ? providerQ.refetch() : q.refetch())}
+          spinning={view === "providers" ? providerQ.isFetching : q.isFetching}
+        />
       </div>
     </div>
   );
@@ -647,6 +1453,41 @@ function ActivityPage() {
       {children}
     </div>
   );
+
+  if (view === "providers") {
+    if (!providerHistory && providerQ.error) {
+      const message = providerQ.error instanceof Error ? providerQ.error.message : String(providerQ.error);
+      return shell(
+        <div className="grid place-items-center gap-2 py-16 text-center">
+          <Codicon name="warning" />
+          <div className={TEXT}>Couldn't load provider history</div>
+          <div className={`max-w-md ${CAPTION}`}>{message}</div>
+          <div className={`max-w-md ${CAPTION}`}>
+            Provider history comes from the Activity backend's local provider archive and live source summaries. It is distinct from Hermes session activity.
+          </div>
+          <div className="mt-2 flex items-center gap-3">
+            <button className="text-[0.75rem] text-(--ui-accent) hover:underline" onClick={() => void providerQ.refetch()} type="button">
+              Retry
+            </button>
+            <button className="text-[0.75rem] text-(--ui-accent) hover:underline" onClick={() => void fetchProviders()} type="button">
+              Fetch provider data
+            </button>
+          </div>
+        </div>,
+      );
+    }
+    if (!providerHistory) {
+      return shell(<div className="flex flex-col gap-5" aria-busy="true" aria-label="Loading provider history"><Skeleton className="h-32" /><Skeleton className="h-40" /></div>);
+    }
+    return shell(
+      <ProviderHistoryView
+        fetchError={fetchProviderError}
+        fetching={fetchingProviders}
+        history={providerHistory}
+        onFetch={fetchProviders}
+      />,
+    );
+  }
 
   if (!data) {
     if (q.error) {

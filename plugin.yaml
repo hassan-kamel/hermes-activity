@@ -1,8 +1,8 @@
 name: hermes-activity
-version: "0.1.1"
+version: "0.2.0"
 manifest_version: 2
 api_version: 1
-description: "GitHub-style activity page for Hermes Desktop: a yearly contribution grid plus token totals and breakdowns, models, platforms, tools, skills and notable sessions. Read-only over the selected Hermes session store. No third-party API calls or telemetry."
+description: "Activity page for Hermes Desktop with local session analytics and an annual provider-reported usage heatmap, token breakdowns and model summaries. Provider refresh uses existing credentials to read provider APIs. No telemetry."
 author: Hassan Kamel
 license: MIT
 homepage: https://github.com/hassan-kamel/hermes-activity
