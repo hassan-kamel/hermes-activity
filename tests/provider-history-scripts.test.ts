@@ -50,7 +50,7 @@ test("desktop output keeps a breakdown computed from the full filtered daily row
 test("refresh normalizes real sources and never persists credentials or identity",async()=>{
   const home=await fixture();
   await mkdir(join(home,".commandcode"),{recursive:true});
-  await writeFile(join(home,".commandcode/auth.json"),JSON.stringify({apiKey:"synthetic-commandcode-secret"}));
+  await writeFile(join(home,".commandcode/auth.json"),'{}');
   await writeFile(join(home,".env"),"OPENCODE_GO_API_KEY=synthetic-opencode-secret\n");
   await writeFile(join(home,"auth.json"),JSON.stringify({credential_pool:{"openai-codex":[{access_token:"synthetic-codex-secret",account_id:"private-account",priority:0}]}}));
   let codexTokens=100;
@@ -64,16 +64,17 @@ test("refresh normalizes real sources and never persists credentials or identity
     if(url.includes("/alpha/usage/summary"))return Response.json({totalCost:11.43,totalCount:1076,totalTokens:157290712,periodBasis:"last-30-days"});
     throw new Error("unexpected endpoint");
   };
-  const options={home,userHome:home,env:{},days:30,provider:"all",refresh:true,fetch:fetcher,now:new Date("2026-10-12T00:45:00Z")};
-  const first=await collectActivityProviderHistory(options);
+  const options={home,userHome:home,env:{COMMAND_CODE_API_KEY:'synthetic-commandcode-secret',OPENCODE_GO_API_KEY:'synthetic-opencode-secret'},days:30,provider:"all",refresh:true,fetch:fetcher,now:new Date("2026-10-12T00:45:00Z")};
+  const refresh=()=>collectActivityProviderHistory({...options,codex:{status:200,data:{profile:{username:'private-person'},stats:{daily_usage_buckets:[{start_date:'2026-10-11',tokens:codexTokens}]},metadata:{stats_as_of:'2026-10-11'}}}});
+  const first=await refresh();
   assert.equal(first.overview.find(p=>p.id==="commandcode")?.periods[0].requests,1076);
   assert.equal(first.overview.find(p=>p.id==="opencode-go")?.daily[0].tokens,15);
   assert.equal(first.overview.find(p=>p.id==="openai-codex")?.daily[0].tokens,100);
   assert.equal(first.overview.find(p=>p.id==="ollama")?.status,"auth-required");
   codexTokens=130;
-  const second=await collectActivityProviderHistory(options);
+  const second=await refresh();
   assert.equal(second.overview.find(p=>p.id==="openai-codex")?.daily[0].tokens,130);
-  const saved=await readFile(join(home,"activity_provider_history.json"),"utf8");
+  const saved=await readFile(join(home,'plugin-data/hermes-activity/activity_provider_history.json'),"utf8");
   for(const text of [saved,JSON.stringify(second)]){
     assert.ok(!text.includes("synthetic-"));
     assert.ok(!text.includes("private-person"));

@@ -1,5 +1,5 @@
 name: hermes-activity
-version: "0.2.0"
+version: "0.2.1"
 manifest_version: 2
 api_version: 1
 description: "Activity page for Hermes Desktop with local session analytics and an annual provider-reported usage heatmap, token breakdowns and model summaries. Provider refresh uses existing credentials to read provider APIs. No telemetry."
@@ -7,6 +7,33 @@ author: Hassan Kamel
 license: MIT
 homepage: https://github.com/hassan-kamel/hermes-activity
 tags: [desktop, analytics, usage, insights, activity]
-requires_hermes: ">=0.21.5"
+requires_hermes: ">=0.21.7"
+requires_auth: [openai-codex]
+config_schema:
+  commandcode_api_key:
+    type: secret
+    env: COMMAND_CODE_API_KEY
+    required: false
+    description: Optional CommandCode usage API key
+  opencode_console_api_key:
+    type: secret
+    env: OPENCODE_CONSOLE_API_KEY
+    required: false
+    description: Optional OpenCode Console usage API key
+  opencode_api_key:
+    type: secret
+    env: OPENCODE_API_KEY
+    required: false
+    description: Optional fallback OpenCode usage API key
+  opencode_go_api_key:
+    type: secret
+    env: OPENCODE_GO_API_KEY
+    required: false
+    description: Optional fallback OpenCode Go usage API key
+  ollama_api_key:
+    type: secret
+    env: OLLAMA_API_KEY
+    required: false
+    description: Optional Ollama Cloud usage API key
 provides_commands:
   - activity

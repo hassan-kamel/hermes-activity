@@ -22,7 +22,7 @@
  * to the cache and never appear in stdout.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,32 +38,21 @@ const SOURCES:Record<string,{scope:string,source:string,note:string}>={
 interface Window {label:string;used_percent:number|null;reset_at:string|null}
 interface Overview extends UsageSource { id:string;fetched_at:string|null;windows:Window[];plan:string|null;breakdown:ProviderBreakdown }
 interface SavedRecord extends UsageSource { fetched_at:string;scope_hash:string }
-interface Options {home:string;days:number;provider:string;refresh:boolean;desktop?:boolean;userHome?:string;env?:NodeJS.ProcessEnv;fetch?:typeof fetch;now?:Date}
+interface CodexResponse { status?:number; data?:unknown; error?:string }
+interface Options {home:string;days:number;provider:string;refresh:boolean;desktop?:boolean;userHome?:string;env?:NodeJS.ProcessEnv;codex?:CodexResponse;fetch?:typeof fetch;now?:Date}
 class ApiFailure extends Error {
   readonly reason: string;
   constructor(reason: string) { super(reason); this.reason = reason; }
 }
 async function readJson(path:string):Promise<any>{try{return JSON.parse(await readFile(path,'utf8'));}catch(error:any){if(error.code==='ENOENT')return {};throw new ApiFailure('invalid-local-cache');}}
-async function readEnv(path:string):Promise<Record<string,string>>{
-  const env:Record<string,string>={};
-  let text='';try{text=await readFile(path,'utf8');}catch(error:any){if(error.code==='ENOENT')return env;throw new ApiFailure('credential-read-failed');}
-  for(const line of text.split('\n')){const m=line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);if(m)env[m[1]]=m[2].replace(/^(["'])(.*)\1$/,'$2');}
-  return env;
-}
+
 function digest(value:string){return createHash('sha256').update(value).digest('hex');}
 function empty(id:string,status:UsageSource['status'],reason:string|null):UsageSource{
   const source=SOURCES[id]??{scope:'account',source:'Activity provider adapter',note:'A provider-history adapter is not connected. Existing quota windows do not establish a dated usage timeline.'};
   return {...source,status,reason,data_as_of:null,periods:[],daily:[]};
 }
 function windowsOf(record:any):Window[]{return Array.isArray(record?.windows)?record.windows.slice(0,32).map((w:any)=>({label:String(w.label||'Window').slice(0,100),used_percent:typeof w.used_percent==='number'&&Number.isFinite(w.used_percent)?w.used_percent:null,reset_at:typeof w.reset_at==='string'?w.reset_at:null})):[];}
-function poolKey(auth:any,id:string,env:Record<string,string>):string{
-  const rows=auth.credential_pool?.[id];
-  if(!Array.isArray(rows))return '';
-  const sorted=[...rows].sort((a,b)=>(typeof a?.priority==='number'?a.priority:Infinity)-(typeof b?.priority==='number'?b.priority:Infinity));
-  for(const r of sorted){const direct=r?.api_key||r?.key;const value=typeof direct==='string'?direct:typeof r?.key_env==='string'?env[r.key_env]:'';if(value?.trim())return value.trim();}
-  return '';
-}
-function claimsOf(token:string):any{try{return JSON.parse(Buffer.from(token.split('.')[1],'base64url').toString('utf8'));}catch{return {};}}
+
 async function readBounded(response:Response):Promise<string>{
   if(!response.body)return '';
   const reader=response.body.getReader();const chunks:Uint8Array[]=[];let size=0;
@@ -79,17 +68,13 @@ async function get(url:string,key:string,fetcher:typeof fetch,deadline:number,ex
   }catch(error){if(error instanceof ApiFailure)throw error;throw new ApiFailure(error instanceof Error && (error.name==='TimeoutError'||error.name==='AbortError')?'timeout':'fetch-error');}
 }
 async function fetchSource(id:string,options:Options):Promise<{usage:UsageSource;scopeHash:string|null}>{
-  const envFile=await readEnv(join(options.home,'.env'));
-  const env={...envFile,...(options.env??process.env)} as Record<string,string>;
-  const userHome=options.userHome??homedir();
+  const env=options.env??{};
   const fetcher=options.fetch??fetch;
   const deadline=Date.now()+30000;
   let scopeHash:string|null=null;
   try{
     if(id==='commandcode'){
-      const local=await readJson(join(userHome,'.commandcode/auth.json'));
-      const auth=typeof local.apiKey==='string'&&local.apiKey.trim()?{}:await readJson(join(options.home,'auth.json'));
-      const key=typeof local.apiKey==='string'&&local.apiKey.trim()?local.apiKey.trim():env.COMMAND_CODE_API_KEY?.trim()||poolKey(auth,'commandcode',env);
+      const key=env.COMMAND_CODE_API_KEY?.trim();
       if(!key)throw new ApiFailure('no-credentials');scopeHash=digest(key);
       const identity=JSON.parse(await get('https://api.commandcode.ai/alpha/whoami?limits=1',key,fetcher,deadline));
       const org=typeof identity?.org?.id==='string'?identity.org.id:null;
@@ -102,40 +87,26 @@ async function fetchSource(id:string,options:Options):Promise<{usage:UsageSource
       return {usage:commandCodeUsage(summary,sub),scopeHash};
     }
     if(id==='openai-codex'){
-      const auth=await readJson(join(options.home,'auth.json'));
-      const rows=auth.credential_pool?.['openai-codex'];
-      const list=Array.isArray(rows)&&rows.length?rows:[auth.providers?.['openai-codex']?.tokens??auth.providers?.['openai-codex']??{}];
-      const candidates=[...list].sort((a,b)=>(typeof a?.priority==='number'?a.priority:Infinity)-(typeof b?.priority==='number'?b.priority:Infinity));
-      const first=candidates.find(r=>typeof r?.access_token==='string'&&r.access_token.trim());
-      if(!first)throw new ApiFailure('no-credentials');
-      let row=first;let claims=claimsOf(row.access_token);const actor=claims['https://api.openai.com/auth']?.chatgpt_account_id;
-      if(typeof claims.exp==='number'&&claims.exp*1000<=Date.now()){
-        const newer=candidates.find(r=>{if(typeof r?.access_token!=='string')return false;const c=claimsOf(r.access_token);return actor && c['https://api.openai.com/auth']?.chatgpt_account_id===actor&&c.sub===claims.sub&&typeof c.exp==='number'&&c.exp*1000>Date.now();});
-        if(newer){row=newer;claims=claimsOf(row.access_token);}else throw new ApiFailure('reauth-required');
+      const response=options.codex;
+      if(!response)throw new ApiFailure('public-api-unavailable');
+      if(response.error){
+        const allowed=['public-api-unavailable','no-credentials','permission-denied','fetch-error','response-too-large','invalid-provider-response'];
+        throw new ApiFailure(allowed.includes(response.error)?response.error:'fetch-error');
       }
-      const key=row.access_token.trim();
-      const account=typeof row.account_id==='string'?row.account_id:claims['https://api.openai.com/auth']?.chatgpt_account_id;
-      scopeHash=digest(typeof account==='string'?'codex:'+account+':'+(claims.sub??''):key);
-      const base=(typeof row.base_url==='string'&&row.base_url?row.base_url:'https://chatgpt.com/backend-api/codex').replace(/\/$/,'').replace(/\/codex$/,'');
-      if(new URL(base).origin!=='https://chatgpt.com')throw new ApiFailure('custom-history-route-not-supported');
-      const headers:Record<string,string>={'User-Agent':'codex-cli'};
-      if(typeof account==='string')headers['ChatGPT-Account-Id']=account;
-      const authClaims=claims['https://api.openai.com/auth'];const residency=authClaims?.chatgpt_data_residency||authClaims?.chatgpt_compute_residency;
-      if(typeof residency==='string'&&residency.trim())headers['x-openai-internal-codex-residency']=residency.trim();
-      return {usage:codexUsage(JSON.parse(await get(base+'/wham/profiles/me',key,fetcher,deadline,headers))),scopeHash};
+      if(response.status!==200){
+        const reasons:Record<number,string>={401:'auth-failed',403:'permission-denied',404:'endpoint-not-available',429:'rate-limited'};
+        throw new ApiFailure(reasons[response.status??0]??'provider-http-error');
+      }
+      return {usage:codexUsage(response.data),scopeHash:null};
     }
     if(id==='opencode-go'){
-      const auth=await readJson(join(userHome,'.local/share/opencode/auth.json'));
-      const local=auth['opencode-go']||auth.opencode||auth['opencode-zen']||auth.zen;
-      const localKey=typeof local==='string'?local:local?.key||local?.apiKey||local?.api_key||local?.zenApiKey||local?.goApiKey;
-      const key=env.OPENCODE_CONSOLE_API_KEY?.trim()||env.OPENCODE_API_KEY?.trim()||env.OPENCODE_GO_API_KEY?.trim()||(typeof localKey==='string'?localKey.trim():'');
+      const key=env.OPENCODE_CONSOLE_API_KEY?.trim()||env.OPENCODE_API_KEY?.trim()||env.OPENCODE_GO_API_KEY?.trim();
       if(!key)throw new ApiFailure('no-credentials');scopeHash=digest(key);
       const csv=await get('https://opencode.ai/console/api/v2/usage/export?range=90d',key,fetcher,deadline,{Accept:'text/csv'});
       return {usage:openCodeUsage(csv,90,options.now),scopeHash};
     }
     if(id==='ollama'){
-      const auth=await readJson(join(options.home,'auth.json'));
-      const key=env.OLLAMA_API_KEY?.trim()||poolKey(auth,'ollama-cloud',env);
+      const key=env.OLLAMA_API_KEY?.trim();
       if(!key)throw new ApiFailure('no-credentials');scopeHash=digest(key);
       return {usage:ollamaUsage(JSON.parse(await get('https://ollama.com/api/usage',key,fetcher,deadline))),scopeHash};
     }
@@ -149,7 +120,7 @@ async function fetchSource(id:string,options:Options):Promise<{usage:UsageSource
   }
 }
 
-interface HistoryOptions {home:string;days:number;provider:string;refresh:boolean;desktop?:boolean;userHome?:string;env?:NodeJS.ProcessEnv;fetch?:typeof fetch;now?:Date}
+type HistoryOptions = Options;
 
 /**
  * Collects the Hermes Activity provider-history payload.
@@ -161,8 +132,10 @@ interface HistoryOptions {home:string;days:number;provider:string;refresh:boolea
 export async function collectActivityProviderHistory(options:HistoryOptions):Promise<Record<string,any>>{
   if(!Number.isInteger(options.days)||options.days<1||options.days>365)throw new Error('days must be 1-365');
   const q=await readJson(join(options.home,'quota_cache.json'));
-  const historyPath=join(options.home,'activity_provider_history.json');
-  const stored=await readJson(historyPath);
+  const cacheDir=join(options.home,'plugin-data','hermes-activity');
+  const historyPath=join(cacheDir,'activity_provider_history.json');
+  const current=await readJson(historyPath);
+  const stored=current.schema_version?current:await readJson(join(options.home,'activity_provider_history.json'));
   const records:Record<string,SavedRecord>=stored.providers&&typeof stored.providers==='object'?{...stored.providers}:{};
   const cacheIds=q.providers&&typeof q.providers==='object'?Object.keys(q.providers).filter(id=>!id.includes(':')):[];
   const ids=options.provider==='all'?[...new Set([...Object.keys(SOURCES),...cacheIds])]:[options.provider];
@@ -181,7 +154,8 @@ export async function collectActivityProviderHistory(options:HistoryOptions):Pro
       if(!success&&same&&previous){usage.daily=previous.daily;usage.periods=previous.periods;usage.data_as_of=previous.data_as_of;usage.note+=' Last successfully fetched data is retained, not a fresh observation.';}
       records[id]={...usage,scope_hash:result.scopeHash??'',fetched_at:success?now.toISOString():same&&previous?previous.fetched_at:now.toISOString()};
     }));
-    await mkdir(options.home,{recursive:true});
+    await mkdir(cacheDir,{recursive:true,mode:0o700});
+    await chmod(cacheDir,0o700);
     const staging=historyPath+'.'+randomUUID()+'.tmp';
     await writeFile(staging,JSON.stringify({schema_version:1,checked_at:now.toISOString(),providers:records})+'\n',{mode:0o600});
     await rename(staging,historyPath);
@@ -224,7 +198,13 @@ if(process.argv[1]&&resolve(process.argv[1])===resolve(fileURLToPath(import.meta
   const provider=positional[1]||valueOf('--provider','all');
   const home=process.env.HERMES_HOME||join(homedir(),'.hermes');
   try{
-    const result=await collectActivityProviderHistory({home,days,provider,refresh:flag('--refresh'),desktop:flag('--desktop')});
+    let input:{keys?:Record<string,string>;codex?:CodexResponse}={};
+    if(flag('--refresh')){
+      let text='';
+      for await(const chunk of process.stdin){text+=chunk;if(Buffer.byteLength(text)>8*1024*1024)throw new ApiFailure('response-too-large');}
+      input=text?JSON.parse(text):{};
+    }
+    const result=await collectActivityProviderHistory({home,days,provider,refresh:flag('--refresh'),desktop:flag('--desktop'),env:input.keys??{},codex:input.codex});
     process.stdout.write(JSON.stringify(result)+'\n');
   }catch(error){
     process.stdout.write(JSON.stringify({overview:[],history_error:error instanceof Error?error.message:'Unable to read activity provider history cache'})+'\n');

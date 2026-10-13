@@ -6,7 +6,7 @@ A read-only activity dashboard for Hermes Desktop. It adds a GitHub-style daily 
 
 ## Requirements
 
-- Hermes Agent `>=0.21.5`
+- Hermes Agent `>=0.21.7` for the public signed-in provider request API
 - Node.js `>=22.18` for native TypeScript provider collection, and npm to build the desktop UI
 - Python is provided by Hermes for the native plugin backend; no additional Python dependencies are installed
 
@@ -29,15 +29,28 @@ npm run install:local
 
 `install:local` copies the compiled `desktop/plugin.js` into `$HERMES_HOME/desktop-plugins/hermes-activity/`. Hermes Desktop watches this folder and hot-reloads the entry. Set `HERMES_HOME` when testing a non-default profile/home.
 
-The UI source is `src/plugin.tsx`; it is TypeScript compiled to plain ESM by `tsc`, with no bundler and no runtime dependency beyond the Hermes Desktop SDK. Styling uses Hermes theme tokens and components so the page follows the active theme.
+The UI source is `src/plugin.tsx`; TypeScript compilation and the local bundling script produce one self-contained ESM entry, with runtime imports limited to the Hermes Desktop SDK and React. Styling uses Hermes theme tokens and components so the page follows the active theme.
 
 ## Data and privacy
 
 The Hermes tab reads the selected profile's `state.db` in SQLite read-only mode. Aggregates are computed locally on that profile. The desktop page uses Hermes' profile-routed `cli.exec` RPC; remote profiles run collection on their configured gateway.
 
-The Providers tab is independent of the Quota plugin. Passive reads use Activity's own `activity_provider_history.json` cache under the selected `HERMES_HOME`. **Fetch provider data** reads the provider APIs using existing saved credentials, without signing in or changing credentials. CommandCode reports period totals only; Codex reports dated token buckets; OpenCode reports daily export totals; Ollama reports activity-period totals when a usable key is available. Missing metrics stay unknown, not zero. Summary-only totals never enter the annual heatmap. Combined figures represent reported account/workspace activity, not exclusively Hermes sessions, and can have partial source coverage.
+The Providers tab is independent of the Quota plugin. Passive reads are cache-only, using `$HERMES_HOME/plugin-data/hermes-activity/activity_provider_history.json` in the selected profile. Activity also optionally reads `$HERMES_HOME/quota_cache.json` for display-only plan labels and quota windows. It never uses quota windows as dated usage history.
 
-No telemetry or credential values are stored in the usage cache or returned to the desktop. Provider caches store usage aggregates and a hashed scope identifier. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for source-adapter attribution.
+**Fetch provider data** uses only Hermes's public credential routes:
+
+| Provider | Credential route | HTTPS hosts and endpoints |
+| --- | --- | --- |
+| Codex | Declared `requires_auth: [openai-codex]`; Hermes's `credentialed_provider_request` attaches the signed-in account credentials. Activity never receives the token. | `chatgpt.com/backend-api/wham/profiles/me` |
+| CommandCode | Optional `COMMAND_CODE_API_KEY` through `agent.secret_scope.get_secret` | `api.commandcode.ai/alpha/whoami`, `/alpha/billing/subscriptions`, `/alpha/usage/summary` |
+| OpenCode | Optional `OPENCODE_CONSOLE_API_KEY`, then `OPENCODE_API_KEY`, then `OPENCODE_GO_API_KEY`, through `agent.secret_scope.get_secret` | `opencode.ai/console/api/v2/usage/export` |
+| Ollama | Optional `OLLAMA_API_KEY` through `agent.secret_scope.get_secret` | `ollama.com/api/usage` |
+
+Configure optional keys through Hermes's plugin secret configuration. OpenCode exports require a Console key with usage-read access; an inference-only key may not work. Activity does not directly read Hermes's `auth.json`, profile `.env`, credential pools, or other CLIs' token files. The Node child receives only the resolved optional API keys and an explicit `PATH`, `HOME`, and `HERMES_HOME` environment, plus the credentialless Codex response over stdin. Passive reads do not resolve secrets or make provider requests. Missing credentials or an unavailable public API are reported, never replaced with a private-file fallback.
+
+CommandCode reports period totals only; Codex reports dated token buckets; OpenCode reports daily export totals; Ollama reports activity-period totals when a usable key is available. Missing metrics stay unknown, not zero. Summary-only totals never enter the annual heatmap. Combined figures represent reported account/workspace activity, not exclusively Hermes sessions, and can have partial source coverage.
+
+No telemetry or credential values are stored in the usage cache or returned to the desktop. Refresh does not implement sign-in or credential changes; Hermes manages authentication through its public routes. Provider caches store normalized usage aggregates and hashed scope identifiers where available. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for source-adapter attribution.
 
 - `hermes activity provider-history --days 365 --desktop --json`
 - `hermes activity provider-history --days 365 --desktop --json --refresh`
