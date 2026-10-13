@@ -117,9 +117,9 @@ def _hermes_home() -> str:
 def collect_provider_history(*, days: int, provider: str = "all", refresh: bool = False, desktop: bool = False) -> dict:
     """Run the TypeScript provider-history collector and return its payload.
 
-    The collector resolves the profile through ``HERMES_HOME`` (passed through
-    explicitly) and reads saved account credentials from that home; credentials
-    are never echoed back. On any failure a structured error is returned instead
+    Explicit refresh resolves declared secrets and uses the public provider broker.
+    Passive reads are cache-only, and credentials are never echoed back.
+    On any failure a structured error is returned instead
     of raising, so the CLI can still emit valid JSON.
     """
     script = Path(__file__).resolve().parent / "scripts" / "provider-history.ts"
@@ -133,11 +133,54 @@ def collect_provider_history(*, days: int, provider: str = "all", refresh: bool 
         command.append("--desktop")
     if refresh:
         command.append("--refresh")
-    env = dict(os.environ)
-    env["HERMES_HOME"] = _hermes_home()
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home()), "HERMES_HOME": _hermes_home()}
+    request = {}
+    if refresh:
+        names = {
+            "commandcode": ("COMMAND_CODE_API_KEY",),
+            "opencode-go": ("OPENCODE_CONSOLE_API_KEY", "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY"),
+            "ollama": ("OLLAMA_API_KEY",),
+        }
+        keys = {}
+        try:
+            from agent.secret_scope import get_secret
+
+            for name in (name for source, group in names.items() if provider in ("all", source) for name in group):
+                value = get_secret(name)
+                if value:
+                    keys[name] = value
+        except Exception:
+            return {"error": "provider secrets unavailable in this profile", "overview": []}
+        env.update(keys)
+        request["keys"] = keys
+        if provider in ("all", "openai-codex"):
+            try:
+                from hermes_cli.plugin_provider_requests import ProviderNotSignedIn, credentialed_provider_request
+            except ImportError:
+                request["codex"] = {"error": "public-api-unavailable"}
+            else:
+                try:
+                    response = credentialed_provider_request(
+                        "openai-codex", "GET", "https://chatgpt.com/backend-api/wham/profiles/me", timeout=20.0
+                    )
+                    if response.status != 200:
+                        request["codex"] = {"status": response.status}
+                    elif len(response.body) > 8 * 1024 * 1024:
+                        request["codex"] = {"error": "response-too-large"}
+                    else:
+                        request["codex"] = {"status": response.status, "data": response.json()}
+                except ProviderNotSignedIn:
+                    request["codex"] = {"error": "no-credentials"}
+                except PermissionError:
+                    request["codex"] = {"error": "permission-denied"}
+                except (ValueError, TypeError):
+                    request["codex"] = {"error": "invalid-provider-response"}
+                except Exception:
+                    request["codex"] = {"error": "fetch-error"}
     try:
         completed = subprocess.run(
             command,
+            input=json.dumps(request),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- Replaced private credential discovery with Hermes public credential routes: the Codex provider request broker and optional declared plugin secrets.
+- Removed reads of private auth files, profile environment files, credential pools and other CLIs' token files, plus custom Codex authentication headers.
+- Isolated the collector's child environment. Passive reads resolve no secrets and make no provider requests.
+- Moved the usage cache under `plugin-data/hermes-activity/` with private directory and file permissions; legacy aggregate caches remain readable.
+- Documented exact credential routes, provider hosts, optional quota-cache reads and the minimum Hermes version, 0.21.7.
+
 ## 0.2.0
 
 - Added a Providers tab with a fixed annual heatmap, combined dated usage, provider filters, usage summaries, token mix and source-period model breakdowns.
