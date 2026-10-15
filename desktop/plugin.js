@@ -562,7 +562,7 @@ function providerModelBreakdown(history) {
 import { useEffect, useMemo, useRef, useState } from "react";
 const ID = "hermes-activity";
 const ROUTE = "/activity";
-const WIDGET_VERSION = "0.2.1"; // must equal plugin.yaml `version`
+const WIDGET_VERSION = "0.2.2"; // must equal plugin.yaml `version`
 const CLI_TIMEOUT_MS = 60_000;
 // ───────────────────────────────────────────────────────────── formatting
 const tokensOf = (s) => s.input_tokens + s.output_tokens + s.cache_read_tokens + s.cache_write_tokens + s.reasoning_tokens;

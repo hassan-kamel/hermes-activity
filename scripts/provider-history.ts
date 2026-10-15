@@ -108,7 +108,7 @@ async function fetchSource(id:string,options:Options):Promise<{usage:UsageSource
     if(id==='ollama'){
       const key=env.OLLAMA_API_KEY?.trim();
       if(!key)throw new ApiFailure('no-credentials');scopeHash=digest(key);
-      return {usage:ollamaUsage(JSON.parse(await get('https://ollama.com/api/usage',key,fetcher,deadline))),scopeHash};
+      return {usage:ollamaUsage(JSON.parse(await get('https://ollama.com/api/usage?range=30d',key,fetcher,deadline))),scopeHash};
     }
     return {usage:empty(id,'not-integrated',null),scopeHash};
   }catch(error){
