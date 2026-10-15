@@ -133,7 +133,9 @@ def collect_provider_history(*, days: int, provider: str = "all", refresh: bool 
         command.append("--desktop")
     if refresh:
         command.append("--refresh")
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home()), "HERMES_HOME": _hermes_home()}
+    runtime_names = {"SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "PATHEXT", "SYSTEMDRIVE"}
+    env = {name: value for name, value in os.environ.items() if name.upper() in runtime_names}
+    env.update({"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home()), "HERMES_HOME": _hermes_home()})
     request = {}
     if refresh:
         names = {

@@ -25,7 +25,7 @@ test("desktop year summary stays parseable below cli.exec's output cap", () => {
     );
     assert.ok(Buffer.byteLength(output) < 48_000);
     const payload = JSON.parse(output);
-    assert.equal(payload.plugin_version, "0.2.1");
+    assert.equal(payload.plugin_version, "0.2.2");
     assert.equal(payload.daily.length > 0, true);
     assert.ok(payload.models.length <= 8);
     assert.ok(payload.tools.length <= 8);

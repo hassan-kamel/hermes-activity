@@ -199,8 +199,51 @@ export function openCodeUsage(csv: string, days=90, now=new Date()): UsageSource
   result.periods=[p];
   return result;
 }
+function ollamaAmount(value: unknown): string | null {
+  if (typeof value !== 'number') return decimal(value);
+  if (!Number.isFinite(value) || value < 0) throw new Error('Invalid provider amount');
+  const text = String(value);
+  if (!text.includes('e')) return decimal(text);
+  const [mantissa, exponent] = text.split('e');
+  const [whole, fraction = ''] = mantissa.split('.');
+  const digits = whole + fraction;
+  const point = whole.length + Number(exponent);
+  return decimal(point <= 0 ? '0.' + '0'.repeat(-point) + digits : point >= digits.length ? digits + '0'.repeat(point - digits.length) : digits.slice(0, point) + '.' + digits.slice(point));
+}
+function ollamaRangeUsage(value: Record<string,any>): UsageSource {
+  if (value.granularity !== 'day' || !Array.isArray(value.buckets)) throw new Error('Invalid Ollama buckets');
+  const totals = record(value.totals);
+  const p = blankPeriod('Provider-reported rolling window', 'range-' + String(value.range));
+  p.start = timestamp(value.from); p.end = timestamp(value.until);
+  if (!p.start || !p.end || Date.parse(p.start) >= Date.parse(p.end)) throw new Error('Invalid Ollama period');
+  p.requests = integer(totals.request_count);
+  p.input_tokens = integer(totals.input_tokens); p.output_tokens = integer(totals.output_tokens);
+  p.tokens = p.input_tokens !== null && p.output_tokens !== null ? integer(p.input_tokens + p.output_tokens) : null;
+  p.cost_usd = ollamaAmount(totals.usage_usd);
+  const result = source('account', 'https://ollama.com/api/usage?range=30d', 'API-reported rolling window, up to 30 days, not Hermes-only. Earlier captured daily buckets are retained without estimating missing days. No model breakdown or quota counters are reported.');
+  const seen = new Set<string>();
+  result.daily = value.buckets.map((raw: unknown) => {
+    const row = record(raw), start = timestamp(row.from), end = timestamp(row.until);
+    if (!start || !end || Date.parse(start) >= Date.parse(end)) throw new Error('Invalid Ollama bucket');
+    const day = new Date(start).toISOString().slice(0,10);
+    if (seen.has(day)) throw new Error('Duplicate Ollama day');
+    seen.add(day);
+    const entry = blankDay(day);
+    entry.requests = integer(row.request_count);
+    entry.input_tokens = integer(row.input_tokens); entry.output_tokens = integer(row.output_tokens);
+    entry.tokens = entry.input_tokens !== null && entry.output_tokens !== null ? integer(entry.input_tokens + entry.output_tokens) : null;
+    entry.cache_read_tokens = integer(row.cached_input_tokens);
+    entry.cost_usd = ollamaAmount(row.usage_usd);
+    return entry;
+  }).sort((a: UsageDay,b: UsageDay) => a.day.localeCompare(b.day));
+  result.periods = [p];
+  result.status = result.daily.length ? 'available' : 'summary-only';
+  return result;
+}
 export function ollamaUsage(payload: unknown): UsageSource {
-  const value=record(payload), activity=record(value.activity);
+  const value=record(payload);
+  if (value.activity === undefined) return ollamaRangeUsage(value);
+  const activity=record(value.activity);
   const reported=activity.period && typeof activity.period==='object' ? record(activity.period) : {};
   const basis=typeof reported.type==='string' ? reported.type : 'unspecified-period';
   const p=blankPeriod(basis.replace(/_/g,' '),basis);

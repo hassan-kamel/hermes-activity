@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Fixed the stripped Node child environment on Windows by preserving a case-insensitive allowlist of runtime essentials, without inheriting arbitrary environment variables or exposing child stderr.
+- Added Ollama's current range/totals/buckets response format and requested its maximum 30-day window. Genuine dated buckets now contribute to history; legacy summaries remain supported.
+- Preserved tiny numeric dollar amounts without fixed-decimal rounding, cached-input counts and unknown metrics. No model or quota data is invented.
+- Added regression tests for both reports and a contributor guide covering setup, validation, privacy and pull requests.
+- Verification uses synthetic provider fixtures and a mocked Windows environment on macOS, not a native Windows host or a live authenticated Ollama request.
+
 ## 0.2.1
 
 - Replaced private credential discovery with Hermes public credential routes: the Codex provider request broker and optional declared plugin secrets.

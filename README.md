@@ -21,6 +21,8 @@ Enable the Activity desktop surface in **Capabilities → Plugins**. On a local 
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, privacy requirements and pull request guidelines.
+
 ```sh
 npm install
 npm run build
@@ -44,11 +46,11 @@ The Providers tab is independent of the Quota plugin. Passive reads are cache-on
 | Codex | Declared `requires_auth: [openai-codex]`; Hermes's `credentialed_provider_request` attaches the signed-in account credentials. Activity never receives the token. | `chatgpt.com/backend-api/wham/profiles/me` |
 | CommandCode | Optional `COMMAND_CODE_API_KEY` through `agent.secret_scope.get_secret` | `api.commandcode.ai/alpha/whoami`, `/alpha/billing/subscriptions`, `/alpha/usage/summary` |
 | OpenCode | Optional `OPENCODE_CONSOLE_API_KEY`, then `OPENCODE_API_KEY`, then `OPENCODE_GO_API_KEY`, through `agent.secret_scope.get_secret` | `opencode.ai/console/api/v2/usage/export` |
-| Ollama | Optional `OLLAMA_API_KEY` through `agent.secret_scope.get_secret` | `ollama.com/api/usage` |
+| Ollama | Optional `OLLAMA_API_KEY` through `agent.secret_scope.get_secret` | `ollama.com/api/usage?range=30d` |
 
-Configure optional keys through Hermes's plugin secret configuration. OpenCode exports require a Console key with usage-read access; an inference-only key may not work. Activity does not directly read Hermes's `auth.json`, profile `.env`, credential pools, or other CLIs' token files. The Node child receives only the resolved optional API keys and an explicit `PATH`, `HOME`, and `HERMES_HOME` environment, plus the credentialless Codex response over stdin. Passive reads do not resolve secrets or make provider requests. Missing credentials or an unavailable public API are reported, never replaced with a private-file fallback.
+Configure optional keys through Hermes's plugin secret configuration. OpenCode exports require a Console key with usage-read access; an inference-only key may not work. Activity does not directly read Hermes's `auth.json`, profile `.env`, credential pools, or other CLIs' token files. The Node child receives only the resolved optional API keys and an explicit `PATH`, `HOME`, and `HERMES_HOME` environment, with only Windows runtime essentials (`SYSTEMROOT`, `WINDIR`, `COMSPEC`, `TEMP`, `TMP`, `PATHEXT`, `SYSTEMDRIVE`) retained case-insensitively from the parent, plus the credentialless Codex response over stdin. Passive reads do not resolve secrets or make provider requests. Missing credentials or an unavailable public API are reported, never replaced with a private-file fallback.
 
-CommandCode reports period totals only; Codex reports dated token buckets; OpenCode reports daily export totals; Ollama reports activity-period totals when a usable key is available. Missing metrics stay unknown, not zero. Summary-only totals never enter the annual heatmap. Combined figures represent reported account/workspace activity, not exclusively Hermes sessions, and can have partial source coverage.
+CommandCode reports period totals only; Codex reports dated token buckets; OpenCode reports daily export totals; Ollama reports dated daily buckets and period totals from its rolling usage API (maximum requested range: 30 days), with legacy activity-period summaries still supported. Previously collected daily buckets remain in the local cache; a first refresh cannot reconstruct a full year. Ollama's range response does not report model breakdowns or quota counters. Missing metrics stay unknown, not zero. Summary-only totals never enter the annual heatmap. Combined figures represent reported account/workspace activity, not exclusively Hermes sessions, and can have partial source coverage.
 
 No telemetry or credential values are stored in the usage cache or returned to the desktop. Refresh does not implement sign-in or credential changes; Hermes manages authentication through its public routes. Provider caches store normalized usage aggregates and hashed scope identifiers where available. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for source-adapter attribution.
 

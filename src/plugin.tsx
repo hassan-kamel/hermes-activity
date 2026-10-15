@@ -65,7 +65,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 
 const ID = "hermes-activity";
 const ROUTE = "/activity";
-const WIDGET_VERSION = "0.2.1"; // must equal plugin.yaml `version`
+const WIDGET_VERSION = "0.2.2"; // must equal plugin.yaml `version`
 const CLI_TIMEOUT_MS = 60_000;
 
 // ───────────────────────────────────────────────────────────── types (CLI payload)
