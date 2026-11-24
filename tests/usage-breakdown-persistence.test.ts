@@ -61,9 +61,16 @@ test("Tools/Skills breakdown reads through the persistence handle, not SessionDB
     const script = [
       "import json,sys,time",
       `sys.path.insert(0,${JSON.stringify(home)})`,
+      "core=True",
+      "try:",
+      "    import agent.insights, persistence_assembly",
+      "except ImportError as exc:",
+      "    core=False; import_error=str(exc)",
+      "else:",
+      "    import_error=''",
       "import activity_pkg.activity_data as ad",
       "tools,skills=ad._usage_breakdown(time.time()-30*86400)",
-      "print(json.dumps({'tools':tools,'skills':skills}))",
+      "print(json.dumps({'core':core,'import_error':import_error,'tools':tools,'skills':skills}))",
     ].join("\n");
     const out = JSON.parse(
       execFileSync("python3", ["-c", script], {
@@ -72,6 +79,10 @@ test("Tools/Skills breakdown reads through the persistence handle, not SessionDB
         timeout: 120_000,
       }),
     );
+    // `python3` must see the Hermes core package for this check to mean anything;
+    // without it `_usage_breakdown` swallows an ImportError and both lists are
+    // empty for a reason that has nothing to do with this wiring.
+    assert.equal(out.core, true, `python3 cannot import the Hermes core (agent.insights): ${out.import_error}`);
     assert.ok(
       out.tools.some((row: any) => row.tool === "terminal" && row.count >= 1),
       `tool breakdown lost its rows: ${JSON.stringify(out.tools)}`,
