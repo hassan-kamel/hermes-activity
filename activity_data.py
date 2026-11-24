@@ -187,17 +187,32 @@ def summary(
 
 
 def _usage_breakdown(start_ts: float) -> tuple[list, dict]:
-    """Tool + skill counts from core InsightsEngine (best effort; empty on any failure)."""
+    """Tool + skill counts from core ``InsightsEngine`` (best effort; empty on any failure).
+
+    The engine reads its storage through a persistence handle, not through ``SessionDB``
+    attributes: Hermes 0.23.3 retired ``SessionDB.db_path`` from the store's public surface,
+    so handing the engine a ``SessionDB`` made it raise ``AttributeError`` on the first read
+    (swallowed here, which left both panels empty). Where the storage assembly door exists,
+    the engine gets its read-only handle directly; on the older releases this plugin still
+    supports it keeps the ``SessionDB`` the engine expects there.
+    """
     try:
         from agent.insights import InsightsEngine
-        from hermes_state import SessionDB
 
         span_days = max(1, int((time.time() - start_ts) // 86400) + 1)
-        db = SessionDB(db_path=db_path(), read_only=True)
         try:
-            usage = InsightsEngine(db).get_usage_breakdown(days=span_days)
-        finally:
-            db.close()
+            from persistence_assembly import open_persistence_reader
+        except ImportError:  # Hermes < 0.23.3 has no storage assembly door
+            from hermes_state import SessionDB
+
+            db = SessionDB(db_path=db_path(), read_only=True)
+            try:
+                usage = InsightsEngine(db).get_usage_breakdown(days=span_days)
+            finally:
+                db.close()
+        else:
+            with open_persistence_reader(db_path()) as reader:
+                usage = InsightsEngine(None, persistence=reader).get_usage_breakdown(days=span_days)
         return usage.get("tools") or [], usage.get("skills") or {}
     except Exception:
         return [], {}
