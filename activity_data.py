@@ -52,6 +52,27 @@ def _columns(conn: sqlite3.Connection) -> set[str]:
     return {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
 
 
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("select 1 from sqlite_master where type='table' and name=?", (name,)).fetchone() is not None
+
+
+def _hostname(url: str) -> str:
+    """Lowercased hostname of a base URL, or ``""``. Tolerates a bare ``host[:port][/path]``.
+
+    Hosts are compared exactly, never by substring: ``https://api.openai.com.example/v1`` is not
+    ``api.openai.com``, and a proxy URL carrying a provider name in its path is not that provider.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        return (urlparse(raw if "://" in raw else f"//{raw}").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 # --------------------------------------------------------------------------- range
 
 
@@ -105,6 +126,36 @@ _SESSION_FIELDS = f"""id, title, source, model, billing_provider AS provider, st
     COALESCE(reasoning_tokens, 0) AS reasoning_tokens, {_TOKENS} AS tokens,
     COALESCE(actual_cost_usd, estimated_cost_usd) AS cost_usd, parent_session_id"""
 
+# Per-model rows come from ``session_model_usage`` joined to the sessions in the window. The
+# usage rows for a session sum to that session's recorded cost, so this view sums to the tab's
+# total — up to the sessions whose usage rows disagree with their own session row (a session
+# re-priced after its total was written); those are the reader's to reconcile, and inventing a
+# correction here would hide them. Grouping the ``sessions`` table by its single ``model`` field
+# attributed a multi-model session's whole cost to one model and never showed the models it also
+# used. The endpoint and provider fall back to the session row when the usage row records none.
+_MODEL_USAGE = """
+    SELECT COALESCE(u.model, 'unknown') AS model,
+           COALESCE(NULLIF(u.billing_provider, ''), s.billing_provider, '') AS provider,
+           COALESCE(NULLIF(u.billing_base_url, ''), s.billing_base_url, '') AS base_url,
+           COALESCE(SUM(u.input_tokens), 0)       AS input_tokens,
+           COALESCE(SUM(u.output_tokens), 0)      AS output_tokens,
+           COALESCE(SUM(u.cache_read_tokens), 0)  AS cache_read_tokens,
+           COALESCE(SUM(u.cache_write_tokens), 0) AS cache_write_tokens,
+           COALESCE(SUM(u.reasoning_tokens), 0)   AS reasoning_tokens,
+           COALESCE(SUM(u.api_call_count), 0)     AS api_calls,
+           COUNT(DISTINCT CASE WHEN s.parent_session_id IS NULL THEN s.id END) AS sessions,
+           COUNT(DISTINCT CASE WHEN s.parent_session_id IS NOT NULL THEN s.id END) AS subagent_sessions,
+           COALESCE(SUM(COALESCE(NULLIF(u.actual_cost_usd, 0), u.estimated_cost_usd)), 0) AS cost_usd,
+           COUNT(DISTINCT CASE WHEN COALESCE(NULLIF(u.actual_cost_usd, 0), u.estimated_cost_usd) > 0
+                               THEN s.id END) AS priced_sessions,
+           COUNT(DISTINCT CASE WHEN u.billing_mode LIKE 'subscription%' THEN s.id END) AS subscription_sessions,
+           MAX(u.last_seen) AS last_used_at
+    FROM session_model_usage u
+    JOIN sessions s ON s.id = u.session_id
+    WHERE s.started_at >= ? AND s.started_at < ?
+    GROUP BY 1, 2, 3
+"""
+
 
 def _sums(cols: set[str]) -> str:
     api = "COALESCE(SUM(api_call_count), 0)" if "api_call_count" in cols else "0"
@@ -117,6 +168,116 @@ def _envelope(start_day: str, end_day: str, days, year) -> dict[str, Any]:
         "generated_at": time.time(),
         "range": {"start": start_day, "end": end_day, "days": days, "year": year},
     }
+
+
+# --------------------------------------------------------------------------- provider identity
+
+def _endpoint_config() -> tuple[dict, dict, dict]:
+    """``(exact-host -> provider, registrable-domain -> provider, host -> declared model names)``
+    from the profile's configured provider endpoints. The config is the record of who serves
+    traffic today; a recorded row's ``billing_base_url`` names the endpoint that answered it, so a
+    provider name recorded under an older config alias (``litellm``, ``custom``) resolves to the
+    provider that owns that endpoint now — one row per gateway, retired names gone. The models a
+    provider declares are the canonical names for that endpoint."""
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        rows = cfg_get(load_config_readonly(), "providers", default=None)
+    except Exception:
+        return {}, {}, {}
+    host_map: dict[str, str] = {}
+    domain_map: dict[str, str] = {}
+    models_map: dict[str, set[str]] = {}
+    for name, row in (rows or {}).items():
+        base = str((row or {}).get("base_url") or "").strip()
+        if not base:
+            continue
+        host = _hostname(base)
+        if not host:
+            continue
+        host_map[host] = name
+        parts = host.split(".")
+        if len(parts) >= 2:
+            domain_map.setdefault(".".join(parts[-2:]), name)
+        declared: set[str] = set()
+        models = (row or {}).get("models")
+        if isinstance(models, dict):
+            declared.update(str(k) for k in models)
+        if (row or {}).get("model"):
+            declared.add(str((row or {}).get("model")))
+        models_map.setdefault(host, set()).update(declared)
+    return host_map, domain_map, models_map
+
+
+def canonical_provider(provider: str, base_url: str) -> str:
+    """The provider that serves traffic today for a recorded row. Endpoint-identified
+    first (the gateway that answered), then the recorded name (``agy://local`` and other
+    non-HTTP routes keep theirs)."""
+    host_map, domain_map, _ = _endpoint_config()
+    if not base_url:
+        return provider
+    host = _hostname(base_url)
+    if not host:
+        return provider
+    return host_map.get(host) or domain_map.get(".".join(host.split(".")[-2:])) or provider
+
+
+def canonical_model(model: str, base_url: str) -> str:
+    """The model a recorded usage row refers to, named the way its endpoint declares it. Exact
+    match wins; then a provider-qualified name whose tail is declared (``strata/Qwen-flash-next``
+    → ``Qwen-flash-next``); then a prefix-stripped variant the endpoint declares
+    (``deepseek-flash`` → ``deepseek/deepseek-flash``, ``claude-haiku-5-5`` →
+    ``anthropic/claude-haiku-5-5``). An engine id the endpoint does not declare
+    (``swift-1.5-iq2_xs``) is not a name variant of the alias the client asked for — the
+    alias→engine mapping lives in the gateway's routing table, which this read-only plugin
+    cannot read — so it stays a row of its own."""
+    _, _, models_map = _endpoint_config()
+    if not model:
+        return model
+    names = models_map.get(_hostname(base_url))
+    if not names:
+        return model
+    if model in names:
+        return model
+    if "/" in model and model.split("/", 1)[1] in names:
+        return model.split("/", 1)[1]
+    for declared in sorted(names, key=lambda n: -len(n)):
+        if "/" in declared and model == declared.split("/", 1)[1]:
+            return declared
+    return model
+
+
+def _merge_provider_rows(rows: list[dict]) -> list[dict]:
+    """Group raw (model, recorded provider, endpoint) rows by the canonical model and canonical
+    provider, summing the aggregate fields. Rows that produced no traffic (no API call and no
+    cost — cron/no-agent sessions) are not model rows, so they are dropped from this view."""
+    merged: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if not row.get("api_calls") and not row.get("cost_usd"):
+            continue
+        key = (
+            canonical_model(row.get("model") or "", row.get("base_url") or ""),
+            canonical_provider(row.get("provider") or "", row.get("base_url") or ""),
+        )
+        target = merged.get(key)
+        if target is None:
+            target = {k: (0 if isinstance(v, (int, float)) and k not in ("last_used_at",) else v)
+                      for k, v in row.items() if k not in ("base_url", "provider", "model")}
+            target["model"] = key[0]
+            target["provider"] = key[1]
+            merged[key] = target
+        for k, v in row.items():
+            if k in ("model", "provider", "base_url"):
+                continue
+            if k == "last_used_at":
+                target[k] = max(target.get(k) or 0, v or 0)
+            else:
+                target[k] = (target.get(k) or 0) + (v or 0)
+    out = sorted(merged.values(), key=lambda m: -(
+        (m.get("input_tokens") or 0) + (m.get("output_tokens") or 0)
+        + (m.get("cache_read_tokens") or 0) + (m.get("cache_write_tokens") or 0)
+        + (m.get("reasoning_tokens") or 0)))
+    return out
 
 
 def summary(
@@ -135,15 +296,19 @@ def summary(
             return out
 
         out["daily"] = _rows(conn, f"SELECT {_DAY} AS day, {sums} FROM sessions {_WHERE} GROUP BY day ORDER BY day", rng)
-        out["models"] = _rows(
-            conn,
-            f"""SELECT COALESCE(model, 'unknown') AS model, billing_provider AS provider, {sums},
-                       MAX(started_at) AS last_used_at
-                FROM sessions {_WHERE}
-                GROUP BY COALESCE(model, 'unknown'), billing_provider
-                ORDER BY SUM({_TOKENS}) DESC""",
-            rng,
-        )
+        if _has_table(conn, "session_model_usage"):
+            raw = _rows(conn, _MODEL_USAGE, rng)
+        else:  # a store with no per-model usage table: session-level rows, the only view it has
+            raw = _rows(
+                conn,
+                f"""SELECT COALESCE(model, 'unknown') AS model, COALESCE(billing_provider, '') AS provider,
+                           COALESCE(billing_base_url, '') AS base_url, {sums},
+                           MAX(started_at) AS last_used_at
+                    FROM sessions {_WHERE}
+                    GROUP BY 1, 2, 3""",
+                rng,
+            )
+        out["models"] = _merge_provider_rows(raw)
         out["sources"] = _rows(
             conn,
             f"""SELECT COALESCE(source, 'unknown') AS source, COUNT(*) AS sessions,
