@@ -119,6 +119,88 @@ def _envelope(start_day: str, end_day: str, days, year) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- provider identity
+
+def _endpoint_provider_maps() -> tuple[dict, dict]:
+    """``(exact-host -> provider, registrable-domain -> provider)`` from the profile's configured
+    provider endpoints. The config is the record of who serves traffic today; a session row's
+    ``billing_base_url`` names the endpoint that answered it, so a provider name recorded under an
+    older config alias (``litellm``, ``custom``) resolves to the provider that owns that endpoint
+    now — one row per gateway, retired names gone."""
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        rows = cfg_get(load_config_readonly(), "providers", default=None)
+    except Exception:
+        return {}, {}
+    host_map: dict[str, str] = {}
+    domain_map: dict[str, str] = {}
+    for name, row in (rows or {}).items():
+        base = str((row or {}).get("base_url") or "").strip()
+        if not base:
+            continue
+        try:
+            from utils import base_url_hostname
+
+            host = base_url_hostname(base)
+        except Exception:
+            continue
+        if not host:
+            continue
+        host_map[host] = name
+        parts = host.split(".")
+        if len(parts) >= 2:
+            domain_map.setdefault(".".join(parts[-2:]), name)
+    return host_map, domain_map
+
+
+def canonical_provider(provider: str, base_url: str) -> str:
+    """The provider that serves traffic today for a recorded session row. Endpoint-identified
+    first (the gateway that answered), then the recorded name (``agy://local`` and other
+    non-HTTP routes keep theirs)."""
+    host_map, domain_map = _endpoint_provider_maps()
+    if not base_url:
+        return provider
+    try:
+        from utils import base_url_hostname
+
+        host = base_url_hostname(base_url)
+    except Exception:
+        return provider
+    if not host:
+        return provider
+    return host_map.get(host) or domain_map.get(".".join(host.split(".")[-2:])) or provider
+
+
+def _merge_provider_rows(rows: list[dict]) -> list[dict]:
+    """Group raw (model, recorded provider, endpoint) rows by the canonical provider, summing
+    the aggregate fields. Rows that served no API call (cron/no-agent sessions) carry no
+    traffic, so they are not provider rows and are dropped from this view."""
+    merged: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if not row.get("api_calls"):
+            continue
+        key = (row["model"], canonical_provider(row.get("provider") or "", row.get("base_url") or ""))
+        target = merged.get(key)
+        if target is None:
+            target = {k: (0 if isinstance(v, (int, float)) and k not in ("last_used_at",) else v)
+                      for k, v in row.items() if k not in ("base_url", "provider")}
+            target["provider"] = key[1]
+            merged[key] = target
+        for k, v in row.items():
+            if k in ("model", "provider", "base_url"):
+                continue
+            if k == "last_used_at":
+                target[k] = max(target.get(k) or 0, v or 0)
+            else:
+                target[k] = (target.get(k) or 0) + (v or 0)
+    out = sorted(merged.values(), key=lambda m: -(
+        (m.get("input_tokens") or 0) + (m.get("output_tokens") or 0)
+        + (m.get("cache_read_tokens") or 0) + (m.get("cache_write_tokens") or 0)
+        + (m.get("reasoning_tokens") or 0)))
+    return out
+
+
 def summary(
     days: Optional[int] = None,
     year: Optional[int] = None,
@@ -135,15 +217,16 @@ def summary(
             return out
 
         out["daily"] = _rows(conn, f"SELECT {_DAY} AS day, {sums} FROM sessions {_WHERE} GROUP BY day ORDER BY day", rng)
-        out["models"] = _rows(
+        raw = _rows(
             conn,
-            f"""SELECT COALESCE(model, 'unknown') AS model, billing_provider AS provider, {sums},
+            f"""SELECT COALESCE(model, 'unknown') AS model, COALESCE(billing_provider, '') AS provider,
+                       COALESCE(billing_base_url, '') AS base_url, {sums},
                        MAX(started_at) AS last_used_at
                 FROM sessions {_WHERE}
-                GROUP BY COALESCE(model, 'unknown'), billing_provider
-                ORDER BY SUM({_TOKENS}) DESC""",
+                GROUP BY 1, 2, 3""",
             rng,
         )
+        out["models"] = _merge_provider_rows(raw)
         out["sources"] = _rows(
             conn,
             f"""SELECT COALESCE(source, 'unknown') AS source, COUNT(*) AS sessions,
